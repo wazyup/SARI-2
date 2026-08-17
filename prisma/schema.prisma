@@ -1,0 +1,124 @@
+// This is your Prisma schema file
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model User {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  password  String
+  role      String   // "ADMIN", "STAFF"
+  createdAt DateTime @default(now())
+  
+  Sales     Sale[]
+}
+
+model Category {
+  id       String    @id @default(cuid())
+  name     String    @unique
+  Products Product[]
+}
+
+model Supplier {
+  id          String    @id @default(cuid())
+  name        String    @unique
+  contactInfo String?
+  address     String?
+  createdAt   DateTime  @default(now())
+  Products    Product[]
+}
+
+model Product {
+  id                String         @id @default(cuid())
+  name              String
+  categoryId        String
+  category          Category       @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  stockQty          Float          @default(0)
+  price             Float          @default(0)
+  unit              String         @default("pcs") // e.g., "pcs", "kg", "pack"
+  imageUrl          String?
+  expirationDate    DateTime?
+  supplierId        String?
+  supplier          Supplier?      @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  lowStockThreshold Float          @default(5)
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  SaleItems         SaleItem[]
+  StockHistory      StockHistory[]
+}
+
+model Sale {
+  id             String         @id @default(cuid())
+  saleDate       DateTime       @default(now())
+  totalAmount    Float
+  paymentMethod  String         // "CASH", "CREDIT"
+  receivedAmount Float          @default(0)
+  changeAmount   Float          @default(0)
+  userId         String
+  user           User           @relation(fields: [userId], references: [id])
+  createdAt      DateTime       @default(now())
+
+  Items          SaleItem[]
+  UtangRecords   UtangRecord[]
+}
+
+model SaleItem {
+  id          String   @id @default(cuid())
+  saleId      String
+  sale        Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantity    Float
+  priceAtSale Float
+}
+
+model Customer {
+  id           String        @id @default(cuid())
+  name         String        @unique
+  phone        String?
+  balance      Float         @default(0) // Current outstanding debt
+  createdAt    DateTime      @default(now())
+  
+  UtangRecords UtangRecord[]
+}
+
+model UtangRecord {
+  id          String    @id @default(cuid())
+  customerId  String
+  customer    Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  type        String    // "CREDIT" (adds to debt), "PAYMENT" (reduces debt)
+  amount      Float
+  description String?
+  date        DateTime  @default(now())
+  saleId      String?
+  sale        Sale?     @relation(fields: [saleId], references: [id], onDelete: SetNull)
+  createdAt   DateTime  @default(now())
+}
+
+model StockHistory {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  type      String   // "ADD", "DEDUCT", "ADJUST"
+  quantity  Float
+  reason    String?  // e.g., "RESTOCK", "SALE", "EXPIRED", "ADJUSTMENT"
+  createdAt DateTime @default(now())
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  type      String   // "LOW_STOCK", "EXPIRATION", "RESTOCK_SUGGESTION"
+  title     String
+  message   String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
