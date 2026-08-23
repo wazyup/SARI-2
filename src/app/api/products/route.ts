@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { getSession } from '@/lib/auth';
 
-// Helper to check authentication
 async function isAuthenticated() {
   const session = await getSession();
   return !!session;
@@ -18,12 +17,6 @@ export async function GET(request: NextRequest) {
   const expiring = searchParams.get('expiring') === 'true';
 
   let whereClause: any = {};
-
-  if (lowStock) {
-    whereClause.stockQty = {
-      lte: prisma.product.fields.lowStockThreshold
-    };
-  }
 
   if (expiring) {
     const thirtyDaysFromNow = new Date();
@@ -46,7 +39,6 @@ export async function GET(request: NextRequest) {
       }
     });
 
-    // Custom filtering for low stock since prisma.fields is not fully supported in some versions of sqlite/prisma fields interface
     let filteredProducts = products;
     if (lowStock) {
       filteredProducts = products.filter(p => p.stockQty <= p.lowStockThreshold);
@@ -65,35 +57,60 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { name, categoryId, stockQty, price, unit, imageUrl, expirationDate, supplierId, lowStockThreshold } = body;
+    const {
+      name,
+      categoryId,
+      stockQty,
+      costPrice,
+      price,
+      transpoFee,
+      unit,
+      imageUrl,
+      expirationDate,
+      supplierId,
+      lowStockThreshold
+    } = body;
 
     if (!name || !categoryId || price === undefined || stockQty === undefined) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
+    const parsedStock = parseFloat(stockQty) || 0;
+    const parsedCost = parseFloat(costPrice) || 0;
+    const parsedPrice = parseFloat(price) || 0;
+    const parsedTranspo = parseFloat(transpoFee) || 0;
+    const parsedThreshold = lowStockThreshold !== undefined ? parseFloat(lowStockThreshold) : 5;
+
     const product = await prisma.product.create({
       data: {
-        name,
+        name: name.trim(),
         categoryId,
-        stockQty: parseFloat(stockQty),
-        price: parseFloat(price),
-        unit,
-        imageUrl,
+        stockQty: parsedStock,
+        costPrice: parsedCost,
+        price: parsedPrice,
+        transpoFee: parsedTranspo,
+        unit: unit || 'pcs',
+        imageUrl: imageUrl || null,
         expirationDate: expirationDate ? new Date(expirationDate) : null,
         supplierId: supplierId || null,
-        lowStockThreshold: lowStockThreshold ? parseFloat(lowStockThreshold) : 5,
+        lowStockThreshold: parsedThreshold,
       }
     });
 
-    // Log stock history
-    await prisma.stockHistory.create({
-      data: {
-        productId: product.id,
-        type: 'ADD',
-        quantity: parseFloat(stockQty),
-        reason: 'INITIAL_STOCK'
-      }
-    });
+    // Log initial stock history
+    if (parsedStock > 0) {
+      await prisma.stockHistory.create({
+        data: {
+          productId: product.id,
+          type: 'ADD',
+          quantity: parsedStock,
+          costPrice: parsedCost,
+          transpoFee: parsedTranspo,
+          supplierId: supplierId || null,
+          reason: 'INITIAL_STOCK'
+        }
+      });
+    }
 
     return NextResponse.json(product);
   } catch (error: any) {
@@ -108,7 +125,23 @@ export async function PUT(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { id, name, categoryId, stockQty, price, unit, imageUrl, expirationDate, supplierId, lowStockThreshold, adjustmentReason } = body;
+    const {
+      id,
+      name,
+      categoryId,
+      stockQty,
+      costPrice,
+      price,
+      transpoFee,
+      unit,
+      imageUrl,
+      expirationDate,
+      supplierId,
+      lowStockThreshold,
+      adjustmentReason,
+      isLossRecording,
+      lossQuantity
+    } = body;
 
     if (!id) {
       return NextResponse.json({ error: 'Product ID is required' }, { status: 400 });
@@ -119,13 +152,60 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: 'Product not found' }, { status: 404 });
     }
 
+    let nextStock = stockQty !== undefined ? parseFloat(stockQty) : currentProduct.stockQty;
+
+    // Handle dedicated loss recording (damaged, expired, lost, given away)
+    if (isLossRecording && lossQuantity) {
+      const parsedLoss = Math.abs(parseFloat(lossQuantity));
+      nextStock = Math.max(0, currentProduct.stockQty - parsedLoss);
+
+      await prisma.stockHistory.create({
+        data: {
+          productId: id,
+          type: 'LOSS',
+          quantity: parsedLoss,
+          costPrice: currentProduct.costPrice,
+          transpoFee: currentProduct.transpoFee,
+          supplierId: currentProduct.supplierId,
+          reason: adjustmentReason || 'DAMAGED'
+        }
+      });
+
+      // Create notification for loss
+      await prisma.notification.create({
+        data: {
+          type: 'LOSS_ALERT',
+          title: `Stock Loss: ${currentProduct.name}`,
+          message: `${parsedLoss} ${currentProduct.unit}(s) marked as ${adjustmentReason || 'LOSS'}.`
+        }
+      });
+    } else if (stockQty !== undefined && parseFloat(stockQty) !== currentProduct.stockQty) {
+      // General stock adjustment / restock
+      const diff = parseFloat(stockQty) - currentProduct.stockQty;
+      const isAdd = diff > 0;
+
+      await prisma.stockHistory.create({
+        data: {
+          productId: id,
+          type: isAdd ? 'ADD' : 'DEDUCT',
+          quantity: Math.abs(diff),
+          costPrice: costPrice !== undefined ? parseFloat(costPrice) : currentProduct.costPrice,
+          transpoFee: transpoFee !== undefined ? parseFloat(transpoFee) : currentProduct.transpoFee,
+          supplierId: supplierId !== undefined ? (supplierId || null) : currentProduct.supplierId,
+          reason: adjustmentReason || (isAdd ? 'RESTOCK' : 'MANUAL_CORRECTION')
+        }
+      });
+    }
+
     const updatedProduct = await prisma.product.update({
       where: { id },
       data: {
-        name: name !== undefined ? name : currentProduct.name,
+        name: name !== undefined ? name.trim() : currentProduct.name,
         categoryId: categoryId !== undefined ? categoryId : currentProduct.categoryId,
-        stockQty: stockQty !== undefined ? parseFloat(stockQty) : currentProduct.stockQty,
+        stockQty: nextStock,
+        costPrice: costPrice !== undefined ? parseFloat(costPrice) : currentProduct.costPrice,
         price: price !== undefined ? parseFloat(price) : currentProduct.price,
+        transpoFee: transpoFee !== undefined ? parseFloat(transpoFee) : currentProduct.transpoFee,
         unit: unit !== undefined ? unit : currentProduct.unit,
         imageUrl: imageUrl !== undefined ? imageUrl : currentProduct.imageUrl,
         expirationDate: expirationDate !== undefined ? (expirationDate ? new Date(expirationDate) : null) : currentProduct.expirationDate,
@@ -133,19 +213,6 @@ export async function PUT(request: NextRequest) {
         lowStockThreshold: lowStockThreshold !== undefined ? parseFloat(lowStockThreshold) : currentProduct.lowStockThreshold,
       }
     });
-
-    // If stock changed, log history
-    if (stockQty !== undefined && parseFloat(stockQty) !== currentProduct.stockQty) {
-      const diff = parseFloat(stockQty) - currentProduct.stockQty;
-      await prisma.stockHistory.create({
-        data: {
-          productId: id,
-          type: diff > 0 ? 'ADD' : 'DEDUCT',
-          quantity: Math.abs(diff),
-          reason: adjustmentReason || 'ADJUSTMENT'
-        }
-      });
-    }
 
     return NextResponse.json(updatedProduct);
   } catch (error: any) {

@@ -20,7 +20,9 @@ interface Product {
   categoryId: string;
   category: Category;
   stockQty: number;
+  costPrice: number;
   price: number;
+  transpoFee: number;
   unit: string;
   imageUrl?: string;
   expirationDate?: string;
@@ -29,47 +31,73 @@ interface Product {
   lowStockThreshold: number;
 }
 
+interface StockHistoryItem {
+  id: string;
+  productId: string;
+  product: Product;
+  type: string;
+  quantity: number;
+  costPrice?: number;
+  transpoFee?: number;
+  supplier?: Supplier;
+  reason?: string;
+  createdAt: string;
+}
+
 export default function InventoryClient() {
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [history, setHistory] = useState<StockHistoryItem[]>([]);
   
+  const [activeTab, setActiveTab] = useState<'PRODUCTS' | 'HISTORY' | 'LOSSES'>('PRODUCTS');
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [loading, setLoading] = useState(true);
+  const [showGuide, setShowGuide] = useState(true);
 
-  // Modal states
+  // Modals
   const [showModal, setShowModal] = useState(false);
+  const [showLossModal, setShowLossModal] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [lossProduct, setLossProduct] = useState<Product | null>(null);
 
   // Form states
   const [name, setName] = useState('');
   const [categoryId, setCategoryId] = useState('');
   const [stockQty, setStockQty] = useState('0');
+  const [costPrice, setCostPrice] = useState('0');
   const [price, setPrice] = useState('0');
+  const [transpoFee, setTranspoFee] = useState('0');
   const [unit, setUnit] = useState('pcs');
   const [imageUrl, setImageUrl] = useState('');
   const [expirationDate, setExpirationDate] = useState('');
   const [supplierId, setSupplierId] = useState('');
   const [lowStockThreshold, setLowStockThreshold] = useState('5');
-  const [adjustmentReason, setAdjustmentReason] = useState('ADJUSTMENT');
+  const [adjustmentReason, setAdjustmentReason] = useState('RESTOCK');
 
-  // Supplier & Category creation inside modal
+  // Loss recording form
+  const [lossQty, setLossQty] = useState('1');
+  const [lossReason, setLossReason] = useState('DAMAGED');
+
+  // Supplier & Category inline creation
   const [newCatName, setNewCatName] = useState('');
   const [newSupName, setNewSupName] = useState('');
 
   const loadData = async () => {
     try {
       setLoading(true);
-      const [prodRes, catRes, supRes] = await Promise.all([
+      const [prodRes, catRes, supRes, histRes] = await Promise.all([
         fetch('/api/products'),
         fetch('/api/categories'),
-        fetch('/api/suppliers')
+        fetch('/api/suppliers'),
+        fetch('/api/stock-history')
       ]);
 
       if (prodRes.ok) setProducts(await prodRes.json());
       if (catRes.ok) setCategories(await catRes.json());
       if (supRes.ok) setSuppliers(await supRes.json());
+      if (histRes.ok) setHistory(await histRes.json());
     } catch (e) {
       console.error(e);
     } finally {
@@ -81,12 +109,26 @@ export default function InventoryClient() {
     loadData();
   }, []);
 
+  // Handle Camera / File Upload converting to Base64
+  const handleImageFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setImageUrl(reader.result as string);
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleOpenAdd = () => {
     setEditingProduct(null);
     setName('');
     setCategoryId(categories[0]?.id || '');
     setStockQty('0');
+    setCostPrice('0');
     setPrice('0');
+    setTranspoFee('0');
     setUnit('pcs');
     setImageUrl('');
     setExpirationDate('');
@@ -100,7 +142,9 @@ export default function InventoryClient() {
     setName(product.name);
     setCategoryId(product.categoryId);
     setStockQty(product.stockQty.toString());
+    setCostPrice(product.costPrice?.toString() || '0');
     setPrice(product.price.toString());
+    setTranspoFee(product.transpoFee?.toString() || '0');
     setUnit(product.unit);
     setImageUrl(product.imageUrl || '');
     setExpirationDate(product.expirationDate ? new Date(product.expirationDate).toISOString().split('T')[0] : '');
@@ -108,6 +152,13 @@ export default function InventoryClient() {
     setLowStockThreshold(product.lowStockThreshold.toString());
     setAdjustmentReason('RESTOCK');
     setShowModal(true);
+  };
+
+  const handleOpenLossModal = (product: Product) => {
+    setLossProduct(product);
+    setLossQty('1');
+    setLossReason('DAMAGED');
+    setShowLossModal(true);
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -118,7 +169,9 @@ export default function InventoryClient() {
       name,
       categoryId,
       stockQty: parseFloat(stockQty),
+      costPrice: parseFloat(costPrice),
       price: parseFloat(price),
+      transpoFee: parseFloat(transpoFee),
       unit,
       imageUrl: imageUrl || null,
       expirationDate: expirationDate || null,
@@ -149,6 +202,35 @@ export default function InventoryClient() {
     }
   };
 
+  const handleSaveLoss = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!lossProduct) return;
+
+    try {
+      const res = await fetch('/api/products', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: lossProduct.id,
+          isLossRecording: true,
+          lossQuantity: parseFloat(lossQty),
+          adjustmentReason: lossReason
+        })
+      });
+
+      if (res.ok) {
+        alert('Loss recorded successfully.');
+        setShowLossModal(false);
+        loadData();
+      } else {
+        const errData = await res.json();
+        alert(errData.error || 'Failed to record loss');
+      }
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
   const handleDelete = async (id: string) => {
     if (!confirm('Are you sure you want to delete this product?')) return;
 
@@ -163,12 +245,12 @@ export default function InventoryClient() {
   };
 
   const handleCreateCategory = async () => {
-    if (!newCatName) return;
+    if (!newCatName.trim()) return;
     try {
       const res = await fetch('/api/categories', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newCatName })
+        body: JSON.stringify({ name: newCatName.trim() })
       });
       if (res.ok) {
         const data = await res.json();
@@ -182,12 +264,12 @@ export default function InventoryClient() {
   };
 
   const handleCreateSupplier = async () => {
-    if (!newSupName) return;
+    if (!newSupName.trim()) return;
     try {
       const res = await fetch('/api/suppliers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newSupName })
+        body: JSON.stringify({ name: newSupName.trim() })
       });
       if (res.ok) {
         const data = await res.json();
@@ -200,7 +282,6 @@ export default function InventoryClient() {
     }
   };
 
-  // Filtering
   const filteredProducts = products.filter(p => {
     const matchesSearch = p.name.toLowerCase().includes(search.toLowerCase()) || 
                           p.supplier?.name.toLowerCase().includes(search.toLowerCase());
@@ -217,126 +298,286 @@ export default function InventoryClient() {
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
     if (diffDays < 0) {
-      return <span className="badge badge-danger">Expired</span>;
+      return <span className="badge badge-danger">⚠️ Expired ({Math.abs(diffDays)}d ago)</span>;
     } else if (diffDays <= 30) {
       return <span className="badge badge-warning">Expiring in {diffDays}d</span>;
     } else {
-      return <span className="badge badge-success">Good ({diffDays}d left)</span>;
+      return <span className="badge badge-success">Good ({diffDays}d)</span>;
     }
   };
 
   return (
     <div>
       <div className="page-header">
-        <h1 className="page-title">Inventory Management</h1>
+        <div>
+          <h1 className="page-title">Inventory & Sourcing</h1>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+            Track product pricing, margins, expiration dates, suppliers, and log damaged goods.
+          </p>
+        </div>
         <div className="header-actions">
+          <button onClick={() => setShowGuide(!showGuide)} className="btn btn-secondary">
+            📖 {showGuide ? 'Hide Guide' : 'How to Use'}
+          </button>
           <button onClick={handleOpenAdd} className="btn btn-primary">
             ➕ Add Product
           </button>
         </div>
       </div>
 
-      {/* Filters bar */}
-      <div className="glass-panel" style={{ padding: '1rem', display: 'flex', gap: '1rem', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
-        <input
-          type="text"
-          className="form-control"
-          placeholder="Search products or suppliers..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          style={{ flex: 1, minWidth: '200px' }}
-        />
+      {/* Tutorial / Quick Guide Box */}
+      {showGuide && (
+        <div className="tutorial-box">
+          <span style={{ fontSize: '1.5rem' }}>💡</span>
+          <div style={{ flex: 1 }}>
+            <h4 style={{ color: 'var(--text-primary)', marginBottom: '0.25rem' }}>How to Manage Inventory</h4>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', lineHeight: 1.5 }}>
+              1. <strong>Add with Camera/File:</strong> Click <em>Add Product</em> and use the camera button to take a photo of your product instantly.<br />
+              2. <strong>Cost & Transpo Margin:</strong> Set your capital (cost price) and transportation fee to track exact profit per item.<br />
+              3. <strong>Record Losses:</strong> Click the ⚠️ icon on any product to log damaged, lost, or given away inventory.<br />
+              4. <strong>Supplier Memory:</strong> Save supplier stores (e.g. Puregold, Super8) once and reuse them anytime.
+            </p>
+          </div>
+        </div>
+      )}
 
-        <select
-          className="form-control"
-          value={categoryFilter}
-          onChange={(e) => setCategoryFilter(e.target.value)}
-          style={{ width: '200px' }}
+      {/* Tabs Bar */}
+      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem' }}>
+        <button
+          onClick={() => setActiveTab('PRODUCTS')}
+          className={`btn ${activeTab === 'PRODUCTS' ? 'btn-primary' : 'btn-secondary'}`}
         >
-          <option value="">All Categories</option>
-          {categories.map(c => (
-            <option key={c.id} value={c.id}>{c.name}</option>
-          ))}
-        </select>
+          📦 Product Catalog ({products.length})
+        </button>
+        <button
+          onClick={() => setActiveTab('HISTORY')}
+          className={`btn ${activeTab === 'HISTORY' ? 'btn-primary' : 'btn-secondary'}`}
+        >
+          🚚 Restocking History
+        </button>
+        <button
+          onClick={() => setActiveTab('LOSSES')}
+          className={`btn ${activeTab === 'LOSSES' ? 'btn-primary' : 'btn-secondary'}`}
+        >
+          ⚠️ Loss & Damaged Logs
+        </button>
       </div>
 
-      {/* Products table */}
-      {loading ? (
-        <p style={{ color: 'var(--text-muted)' }}>Loading products database...</p>
-      ) : (
+      {activeTab === 'PRODUCTS' && (
+        <>
+          {/* Filters Bar */}
+          <div className="glass-panel" style={{ padding: '1rem', display: 'flex', gap: '0.75rem', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
+            <div className="search-bar-container" style={{ flex: 1, minWidth: '220px' }}>
+              <input
+                type="text"
+                className="form-control"
+                placeholder="Search products or suppliers..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              <button className="btn btn-secondary" style={{ padding: '0.65rem 0.85rem' }}>
+                🔍
+              </button>
+            </div>
+
+            <select
+              className="form-control"
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value)}
+              style={{ width: '180px' }}
+            >
+              <option value="">All Categories</option>
+              {categories.map(c => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Products Table */}
+          {loading ? (
+            <p style={{ color: 'var(--text-muted)' }}>Loading products database...</p>
+          ) : (
+            <div className="glass-panel table-container">
+              <table className="custom-table">
+                <thead>
+                  <tr>
+                    <th>Image</th>
+                    <th>Product Name</th>
+                    <th>Category</th>
+                    <th>Stock Qty</th>
+                    <th>Capital / Selling Price</th>
+                    <th>Profit / Unit</th>
+                    <th>Supplier</th>
+                    <th>Expiration</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredProducts.length === 0 ? (
+                    <tr>
+                      <td colSpan={9} style={{ textAlign: 'center', color: 'var(--text-dim)', padding: '2rem' }}>
+                        No products found
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredProducts.map(p => {
+                      const isLowStock = p.stockQty <= p.lowStockThreshold;
+                      const totalCost = (p.costPrice || 0) + (p.transpoFee || 0);
+                      const profit = p.price - totalCost;
+
+                      return (
+                        <tr key={p.id}>
+                          <td>
+                            <img
+                              src={p.imageUrl || 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=80'}
+                              alt={p.name}
+                              style={{ width: '44px', height: '44px', objectFit: 'cover', borderRadius: '8px' }}
+                            />
+                          </td>
+                          <td style={{ fontWeight: 600 }}>{p.name}</td>
+                          <td>
+                            <span className="badge badge-primary">{p.category?.name}</span>
+                          </td>
+                          <td>
+                            <span style={{
+                              fontWeight: 700,
+                              color: isLowStock ? 'var(--danger)' : 'var(--text-primary)'
+                            }}>
+                              {p.stockQty} {p.unit}(s)
+                            </span>
+                            {isLowStock && <div style={{ fontSize: '0.7rem', color: 'var(--danger)' }}>Low Stock</div>}
+                          </td>
+                          <td>
+                            <div style={{ fontSize: '0.85rem' }}>
+                              <span style={{ color: 'var(--text-dim)' }}>Cost: ₱{totalCost}</span> → <strong style={{ color: 'var(--secondary)' }}>₱{p.price}</strong>
+                            </div>
+                          </td>
+                          <td>
+                            <span style={{ fontWeight: 700, color: profit >= 0 ? 'var(--success)' : 'var(--danger)' }}>
+                              +₱{profit.toFixed(2)}
+                            </span>
+                          </td>
+                          <td style={{ color: 'var(--text-muted)' }}>{p.supplier?.name || '—'}</td>
+                          <td>{getExpirationBadge(p.expirationDate)}</td>
+                          <td>
+                            <div style={{ display: 'flex', gap: '0.4rem' }}>
+                              <button onClick={() => handleOpenEdit(p)} className="btn btn-secondary" style={{ padding: '0.35rem 0.55rem', fontSize: '0.75rem' }} title="Edit Product">
+                                ✏️
+                              </button>
+                              <button onClick={() => handleOpenLossModal(p)} className="btn btn-secondary" style={{ padding: '0.35rem 0.55rem', fontSize: '0.75rem' }} title="Record Loss/Damage">
+                                ⚠️
+                              </button>
+                              <button onClick={() => handleDelete(p.id)} className="btn btn-danger" style={{ padding: '0.35rem 0.55rem', fontSize: '0.75rem' }} title="Delete Product">
+                                🗑️
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* RESTOCKING HISTORY TAB */}
+      {activeTab === 'HISTORY' && (
         <div className="glass-panel table-container">
           <table className="custom-table">
             <thead>
               <tr>
-                <th>Image</th>
-                <th>Product Name</th>
-                <th>Category</th>
-                <th>Stock Qty</th>
-                <th>Unit Price</th>
+                <th>Date / Time</th>
+                <th>Product</th>
                 <th>Supplier</th>
-                <th>Expiration</th>
-                <th>Actions</th>
+                <th>Quantity Added</th>
+                <th>Cost Price</th>
+                <th>Transpo Fee</th>
+                <th>Reason</th>
               </tr>
             </thead>
             <tbody>
-              {filteredProducts.length === 0 ? (
+              {history.filter(h => h.type === 'ADD').length === 0 ? (
                 <tr>
-                  <td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-dim)', padding: '2rem' }}>
-                    No products found
+                  <td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-dim)', padding: '2rem' }}>
+                    No restocking history found.
                   </td>
                 </tr>
               ) : (
-                filteredProducts.map(p => {
-                  const isLowStock = p.stockQty <= p.lowStockThreshold;
-                  return (
-                    <tr key={p.id}>
-                      <td>
-                        <img
-                          src={p.imageUrl || 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=80'}
-                          alt={p.name}
-                          style={{ width: '40px', height: '40px', objectFit: 'cover', borderRadius: '6px' }}
-                        />
-                      </td>
-                      <td style={{ fontWeight: 600 }}>{p.name}</td>
-                      <td>
-                        <span className="badge badge-primary">{p.category?.name}</span>
-                      </td>
-                      <td>
-                        <span style={{
-                          fontWeight: 700,
-                          color: isLowStock ? 'var(--danger)' : 'var(--text-primary)'
-                        }}>
-                          {p.stockQty} {p.unit}(s)
-                        </span>
-                        {isLowStock && <div style={{ fontSize: '0.7rem', color: 'var(--danger)' }}>Low Stock</div>}
-                      </td>
-                      <td style={{ fontWeight: 600 }}>₱{p.price.toLocaleString()}</td>
-                      <td style={{ color: 'var(--text-muted)' }}>{p.supplier?.name || '—'}</td>
-                      <td>{getExpirationBadge(p.expirationDate)}</td>
-                      <td>
-                        <div style={{ display: 'flex', gap: '0.5rem' }}>
-                          <button onClick={() => handleOpenEdit(p)} className="btn btn-secondary" style={{ padding: '0.4rem 0.6rem', fontSize: '0.8rem' }}>
-                            ✏️
-                          </button>
-                          <button onClick={() => handleDelete(p.id)} className="btn btn-danger" style={{ padding: '0.4rem 0.6rem', fontSize: '0.8rem' }}>
-                            🗑️
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
+                history.filter(h => h.type === 'ADD').map(h => (
+                  <tr key={h.id}>
+                    <td style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+                      {new Date(h.createdAt).toLocaleString()}
+                    </td>
+                    <td style={{ fontWeight: 600 }}>{h.product?.name}</td>
+                    <td>{h.supplier?.name || 'Direct Wholesale'}</td>
+                    <td style={{ color: 'var(--success)', fontWeight: 700 }}>
+                      +{h.quantity} {h.product?.unit}
+                    </td>
+                    <td>₱{h.costPrice || 0}</td>
+                    <td>₱{h.transpoFee || 0}</td>
+                    <td>
+                      <span className="badge badge-success">{h.reason || 'RESTOCK'}</span>
+                    </td>
+                  </tr>
+                ))
               )}
             </tbody>
           </table>
         </div>
       )}
 
-      {/* Add/Edit Modal */}
+      {/* LOSSES TAB */}
+      {activeTab === 'LOSSES' && (
+        <div className="glass-panel table-container">
+          <table className="custom-table">
+            <thead>
+              <tr>
+                <th>Date / Time</th>
+                <th>Product</th>
+                <th>Quantity Lost</th>
+                <th>Cost Impact</th>
+                <th>Reason / Classification</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.filter(h => h.type === 'LOSS').length === 0 ? (
+                <tr>
+                  <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-dim)', padding: '2rem' }}>
+                    No loss or damage records registered.
+                  </td>
+                </tr>
+              ) : (
+                history.filter(h => h.type === 'LOSS').map(h => (
+                  <tr key={h.id}>
+                    <td style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+                      {new Date(h.createdAt).toLocaleString()}
+                    </td>
+                    <td style={{ fontWeight: 600 }}>{h.product?.name}</td>
+                    <td style={{ color: 'var(--danger)', fontWeight: 700 }}>
+                      -{h.quantity} {h.product?.unit}
+                    </td>
+                    <td style={{ color: 'var(--danger)' }}>
+                      ₱{((h.costPrice || 0) * h.quantity).toFixed(2)}
+                    </td>
+                    <td>
+                      <span className="badge badge-danger">{h.reason}</span>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Add / Edit Product Modal */}
       {showModal && (
         <div className="modal-overlay">
-          <div className="glass-panel modal-content" style={{ maxHeight: '90vh', overflowY: 'auto' }}>
-            <h2 style={{ marginBottom: '1.5rem' }}>{editingProduct ? 'Edit Product' : 'Add New Product'}</h2>
+          <div className="glass-panel modal-content">
+            <h2 style={{ marginBottom: '1.25rem' }}>{editingProduct ? 'Edit Product' : 'Add New Product'}</h2>
 
             <form onSubmit={handleSave}>
               <div className="form-group">
@@ -371,7 +612,7 @@ export default function InventoryClient() {
                     placeholder="New..."
                     value={newCatName}
                     onChange={(e) => setNewCatName(e.target.value)}
-                    style={{ width: '100px' }}
+                    style={{ width: '90px' }}
                   />
                   <button type="button" onClick={handleCreateCategory} className="btn btn-secondary">
                     Add
@@ -379,7 +620,7 @@ export default function InventoryClient() {
                 </div>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.85rem' }}>
                 <div className="form-group">
                   <label className="form-label">Stock Quantity *</label>
                   <input
@@ -404,25 +645,34 @@ export default function InventoryClient() {
                 </div>
               </div>
 
-              {/* Stock adjustment reason if editing */}
-              {editingProduct && (
+              {/* Pricing & Transpo Margins */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.85rem' }}>
                 <div className="form-group">
-                  <label className="form-label">Reason for Stock Adjustment</label>
-                  <select
+                  <label className="form-label">Cost Price (₱)</label>
+                  <input
+                    type="number"
+                    step="any"
                     className="form-control"
-                    value={adjustmentReason}
-                    onChange={(e) => setAdjustmentReason(e.target.value)}
-                  >
-                    <option value="RESTOCK">Restock (Added New Supply)</option>
-                    <option value="EXPIRED">Disposed Expired Goods</option>
-                    <option value="ADJUSTMENT">Manual Inventory Correction</option>
-                  </select>
+                    placeholder="Capital"
+                    value={costPrice}
+                    onChange={(e) => setCostPrice(e.target.value)}
+                  />
                 </div>
-              )}
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: '1rem' }}>
                 <div className="form-group">
-                  <label className="form-label">Unit Price (₱) *</label>
+                  <label className="form-label">Transpo Fee (₱)</label>
+                  <input
+                    type="number"
+                    step="any"
+                    className="form-control"
+                    placeholder="Delivery"
+                    value={transpoFee}
+                    onChange={(e) => setTranspoFee(e.target.value)}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Selling Price (₱) *</label>
                   <input
                     type="number"
                     step="any"
@@ -432,28 +682,38 @@ export default function InventoryClient() {
                     required
                   />
                 </div>
-
-                <div className="form-group">
-                  <label className="form-label">Unit (e.g. pcs, pack)</label>
-                  <input
-                    type="text"
-                    className="form-control"
-                    value={unit}
-                    onChange={(e) => setUnit(e.target.value)}
-                    required
-                  />
-                </div>
               </div>
 
               <div className="form-group">
-                <label className="form-label">Product Image URL</label>
+                <label className="form-label">Unit (e.g. pcs, pack, can, bottle)</label>
                 <input
-                  type="url"
+                  type="text"
                   className="form-control"
-                  placeholder="https://example.com/image.jpg"
-                  value={imageUrl}
-                  onChange={(e) => setImageUrl(e.target.value)}
+                  value={unit}
+                  onChange={(e) => setUnit(e.target.value)}
+                  required
                 />
+              </div>
+
+              {/* Camera & File Upload Image */}
+              <div className="form-group">
+                <label className="form-label">📸 Product Photo (From Camera or File)</label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  className="form-control"
+                  onChange={handleImageFileUpload}
+                  style={{ padding: '0.45rem' }}
+                />
+                {imageUrl && (
+                  <div style={{ marginTop: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                    <img src={imageUrl} alt="Preview" style={{ width: '60px', height: '60px', borderRadius: '8px', objectFit: 'cover' }} />
+                    <button type="button" onClick={() => setImageUrl('')} className="btn btn-secondary" style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}>
+                      Remove Image
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="form-group">
@@ -466,7 +726,7 @@ export default function InventoryClient() {
                 />
               </div>
 
-              {/* Supplier selector */}
+              {/* Supplier Selector */}
               <div className="form-group">
                 <label className="form-label">Supplier Memory Dropdown</label>
                 <div style={{ display: 'flex', gap: '0.5rem' }}>
@@ -486,7 +746,7 @@ export default function InventoryClient() {
                     placeholder="New..."
                     value={newSupName}
                     onChange={(e) => setNewSupName(e.target.value)}
-                    style={{ width: '100px' }}
+                    style={{ width: '90px' }}
                   />
                   <button type="button" onClick={handleCreateSupplier} className="btn btn-secondary">
                     Add
@@ -494,12 +754,64 @@ export default function InventoryClient() {
                 </div>
               </div>
 
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginTop: '2rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', marginTop: '1.75rem' }}>
                 <button type="button" onClick={() => setShowModal(false)} className="btn btn-secondary">
                   Cancel
                 </button>
                 <button type="submit" className="btn btn-primary">
                   Save Product
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Record Loss / Damage Modal */}
+      {showLossModal && lossProduct && (
+        <div className="modal-overlay">
+          <div className="glass-panel modal-content" style={{ maxWidth: '450px' }}>
+            <h2 style={{ marginBottom: '0.5rem', color: '#f87171' }}>⚠️ Record Loss / Stock Reduction</h2>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '1.25rem' }}>
+              Product: <strong>{lossProduct.name}</strong> (Available Stock: {lossProduct.stockQty} {lossProduct.unit}s)
+            </p>
+
+            <form onSubmit={handleSaveLoss}>
+              <div className="form-group">
+                <label className="form-label">Quantity Lost / Reduced *</label>
+                <input
+                  type="number"
+                  step="any"
+                  max={lossProduct.stockQty}
+                  min="0.1"
+                  className="form-control"
+                  value={lossQty}
+                  onChange={(e) => setLossQty(e.target.value)}
+                  required
+                />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Reason / Classification *</label>
+                <select
+                  className="form-control"
+                  value={lossReason}
+                  onChange={(e) => setLossReason(e.target.value)}
+                >
+                  <option value="DAMAGED">📦 Damaged Goods</option>
+                  <option value="EXPIRED">⏳ Expired Products (Disposed)</option>
+                  <option value="LOST">🔍 Lost / Missing</option>
+                  <option value="GIVEN_AWAY">🎁 Given Away / Personal Consumption</option>
+                  <option value="MANUAL_CORRECTION">🛠️ Inventory Audit Correction</option>
+                </select>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', marginTop: '1.5rem' }}>
+                <button type="button" onClick={() => setShowLossModal(false)} className="btn btn-secondary">
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-danger">
+                  Confirm Loss
                 </button>
               </div>
             </form>

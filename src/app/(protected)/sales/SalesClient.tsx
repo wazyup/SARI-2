@@ -38,11 +38,13 @@ export default function SalesClient() {
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [cart, setCart] = useState<CartItem[]>([]);
+  const [showGuide, setShowGuide] = useState(false);
   
   // Checkout states
   const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'CREDIT'>('CASH');
   const [receivedAmount, setReceivedAmount] = useState('');
   const [customerId, setCustomerId] = useState('');
+  const [customerSearch, setCustomerSearch] = useState('');
   const [newCustomerName, setNewCustomerName] = useState('');
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
   
@@ -59,7 +61,15 @@ export default function SalesClient() {
 
       if (prodRes.ok) setProducts(await prodRes.json());
       if (catRes.ok) setCategories(await catRes.json());
-      if (custRes.ok) setCustomers(await custRes.json());
+      if (custRes.ok) {
+        const custs = await custRes.json();
+        setCustomers(custs);
+        // Customer Memory: Remember last selected customer
+        const lastCust = localStorage.getItem('sari2_last_customer_id');
+        if (lastCust && custs.some((c: Customer) => c.id === lastCust)) {
+          setCustomerId(lastCust);
+        }
+      }
     } catch (e) {
       console.error(e);
     } finally {
@@ -120,17 +130,18 @@ export default function SalesClient() {
   };
 
   const handleCreateCustomer = async () => {
-    if (!newCustomerName) return;
+    if (!newCustomerName.trim()) return;
     try {
       const res = await fetch('/api/customers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newCustomerName, phone: newCustomerPhone })
+        body: JSON.stringify({ name: newCustomerName.trim(), phone: newCustomerPhone.trim() })
       });
       if (res.ok) {
         const data = await res.json();
         setCustomers(prev => [...prev, data]);
         setCustomerId(data.id);
+        localStorage.setItem('sari2_last_customer_id', data.id);
         setNewCustomerName('');
         setNewCustomerPhone('');
       }
@@ -180,45 +191,80 @@ export default function SalesClient() {
 
       if (res.ok) {
         alert('Transaction completed successfully!');
+        if (customerId) {
+          localStorage.setItem('sari2_last_customer_id', customerId);
+        }
         setCart([]);
         setReceivedAmount('');
-        setCustomerId('');
-        loadData(); // Reload products stock levels
+        loadData();
       } else {
         const err = await res.json();
         alert(err.error || 'Failed to complete checkout');
       }
     } catch (err) {
       console.error(err);
-      alert('Error connecting to the server');
+      alert('Error connecting to server');
     }
   };
 
-  // Filter products
   const filteredProducts = products.filter(p => {
     const matchesSearch = p.name.toLowerCase().includes(search.toLowerCase());
     const matchesCategory = categoryFilter === '' || p.categoryId === categoryFilter;
     return matchesSearch && matchesCategory;
   });
 
+  const filteredCustomers = customers.filter(c =>
+    c.name.toLowerCase().includes(customerSearch.toLowerCase())
+  );
+
   return (
     <div>
       <div className="page-header">
-        <h1 className="page-title">Point of Sale (POS)</h1>
+        <div>
+          <h1 className="page-title">Point of Sale (POS)</h1>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+            Fast checkout, instant stock deduction, and seamless credit (utang) attachment.
+          </p>
+        </div>
+        <div className="header-actions">
+          <button onClick={() => setShowGuide(!showGuide)} className="btn btn-secondary">
+            📖 {showGuide ? 'Hide Guide' : 'How to Use'}
+          </button>
+        </div>
       </div>
+
+      {/* Tutorial / Quick Guide Box */}
+      {showGuide && (
+        <div className="tutorial-box">
+          <span style={{ fontSize: '1.5rem' }}>💡</span>
+          <div style={{ flex: 1 }}>
+            <h4 style={{ color: 'var(--text-primary)', marginBottom: '0.25rem' }}>POS Checkout Guide</h4>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', lineHeight: 1.5 }}>
+              1. <strong>Add to Cart:</strong> Tap any product card on the left to add it to the active transaction.<br />
+              2. <strong>Cash Checkout:</strong> Enter amount handed by the buyer; change is calculated automatically.<br />
+              3. <strong>Credit (Utang) Checkout:</strong> Select <em>Credit</em>, choose or create the customer name, and the sale will post directly to their ledger.
+            </p>
+          </div>
+        </div>
+      )}
 
       <div className="pos-layout">
         {/* Products List Pane */}
         <div className="pos-products">
           <div className="glass-panel" style={{ padding: '0.75rem', display: 'flex', gap: '0.5rem' }}>
-            <input
-              type="text"
-              className="form-control"
-              placeholder="Search products..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              style={{ flex: 1 }}
-            />
+            <div className="search-bar-container" style={{ flex: 1 }}>
+              <input
+                type="text"
+                className="form-control"
+                placeholder="Search products..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              <button className="btn btn-secondary" style={{ padding: '0.65rem 0.85rem' }}>
+                🔍
+              </button>
+            </div>
+
             <select
               className="form-control"
               value={categoryFilter}
@@ -261,7 +307,7 @@ export default function SalesClient() {
         {/* Checkout Cart Pane */}
         <div className="glass-panel pos-cart">
           <div>
-            <h3 style={{ borderBottom: '1px solid var(--border-glass)', paddingBottom: '0.75rem' }}>Active Cart</h3>
+            <h3 style={{ borderBottom: '1px solid var(--border-glass)', paddingBottom: '0.75rem', fontSize: '1.05rem' }}>Active Cart ({cart.length})</h3>
             
             {cart.length === 0 ? (
               <div style={{ padding: '3rem 0', textAlign: 'center', color: 'var(--text-dim)' }}>
@@ -280,13 +326,13 @@ export default function SalesClient() {
                       </div>
                     </div>
 
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                       <input
                         type="number"
                         className="form-control"
                         value={item.quantity}
                         onChange={(e) => updateQuantity(item.product.id, parseInt(e.target.value) || 0)}
-                        style={{ width: '60px', padding: '0.25rem 0.5rem', textAlign: 'center' }}
+                        style={{ width: '55px', padding: '0.25rem 0.4rem', textAlign: 'center' }}
                       />
                       <button onClick={() => removeFromCart(item.product.id)} className="btn btn-danger" style={{ padding: '0.25rem 0.5rem' }}>
                         ✕
@@ -298,16 +344,16 @@ export default function SalesClient() {
             )}
           </div>
 
-          {/* Checkout controls */}
-          <div style={{ borderTop: '1px solid var(--border-glass)', paddingTop: '1rem', marginTop: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '1.25rem', fontWeight: 800, marginBottom: '1rem' }}>
+          {/* Checkout Controls */}
+          <div style={{ borderTop: '1px solid var(--border-glass)', paddingTop: '0.85rem', marginTop: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '1.25rem', fontWeight: 800, marginBottom: '0.85rem' }}>
               <span>Total:</span>
               <span style={{ color: 'var(--secondary)' }}>₱{totalAmount.toLocaleString()}</span>
             </div>
 
             {cart.length > 0 && (
-              <form onSubmit={handleCheckout} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                <div className="form-group">
+              <form onSubmit={handleCheckout} style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+                <div className="form-group" style={{ marginBottom: 0 }}>
                   <label className="form-label">Payment Method</label>
                   <div style={{ display: 'flex', gap: '0.5rem' }}>
                     <button
@@ -330,8 +376,8 @@ export default function SalesClient() {
                 </div>
 
                 {paymentMethod === 'CASH' ? (
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                    <div className="form-group">
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                    <div className="form-group" style={{ marginBottom: 0 }}>
                       <label className="form-label">Cash Received (₱)</label>
                       <input
                         type="number"
@@ -343,7 +389,7 @@ export default function SalesClient() {
                         placeholder="0"
                       />
                     </div>
-                    <div className="form-group">
+                    <div className="form-group" style={{ marginBottom: 0 }}>
                       <label className="form-label">Change (₱)</label>
                       <div className="form-control" style={{ background: 'rgba(255,255,255,0.02)', fontWeight: 700, color: changeAmount >= 0 ? 'var(--success)' : 'var(--danger)' }}>
                         ₱{changeAmount >= 0 ? changeAmount.toLocaleString() : '0'}
@@ -351,47 +397,43 @@ export default function SalesClient() {
                     </div>
                   </div>
                 ) : (
-                  <div className="form-group">
-                    <label className="form-label">Select Debtor Customer</label>
+                  <div className="form-group" style={{ marginBottom: 0 }}>
+                    <label className="form-label">Customer (Utang Memory)</label>
                     <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
                       <select
                         className="form-control"
                         value={customerId}
-                        onChange={(e) => setCustomerId(e.target.value)}
+                        onChange={(e) => {
+                          setCustomerId(e.target.value);
+                          localStorage.setItem('sari2_last_customer_id', e.target.value);
+                        }}
                         required
                       >
                         <option value="">Select Customer</option>
-                        {customers.map(c => (
-                          <option key={c.id} value={c.id}>{c.name} (Bal: ₱{c.balance})</option>
+                        {filteredCustomers.map(c => (
+                          <option key={c.id} value={c.id}>{c.name} (Balance: ₱{c.balance})</option>
                         ))}
                       </select>
                     </div>
-                    {/* Add Customer shortcut */}
+
+                    {/* Quick Add Customer */}
                     <div style={{ display: 'flex', gap: '0.25rem' }}>
                       <input
                         type="text"
                         className="form-control"
-                        placeholder="Add customer name..."
+                        placeholder="Add new customer..."
                         value={newCustomerName}
                         onChange={(e) => setNewCustomerName(e.target.value)}
-                        style={{ fontSize: '0.85rem' }}
+                        style={{ fontSize: '0.82rem' }}
                       />
-                      <input
-                        type="text"
-                        className="form-control"
-                        placeholder="Phone..."
-                        value={newCustomerPhone}
-                        onChange={(e) => setNewCustomerPhone(e.target.value)}
-                        style={{ fontSize: '0.85rem', width: '100px' }}
-                      />
-                      <button type="button" onClick={handleCreateCustomer} className="btn btn-secondary" style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}>
-                        Create
+                      <button type="button" onClick={handleCreateCustomer} className="btn btn-secondary" style={{ padding: '0.25rem 0.55rem', fontSize: '0.75rem' }}>
+                        Add
                       </button>
                     </div>
                   </div>
                 )}
 
-                <button type="submit" className="btn btn-primary" style={{ width: '100%', padding: '0.85rem' }}>
+                <button type="submit" className="btn btn-primary" style={{ width: '100%', padding: '0.8rem' }}>
                   Complete Checkout
                 </button>
               </form>

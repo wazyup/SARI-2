@@ -28,12 +28,13 @@ model Category {
 }
 
 model Supplier {
-  id          String    @id @default(cuid())
-  name        String    @unique
-  contactInfo String?
-  address     String?
-  createdAt   DateTime  @default(now())
-  Products    Product[]
+  id           String         @id @default(cuid())
+  name         String         @unique
+  contactInfo  String?
+  address      String?
+  createdAt    DateTime       @default(now())
+  Products     Product[]
+  StockHistory StockHistory[]
 }
 
 model Product {
@@ -42,9 +43,11 @@ model Product {
   categoryId        String
   category          Category       @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   stockQty          Float          @default(0)
-  price             Float          @default(0)
+  costPrice         Float          @default(0) // Capital cost per unit
+  price             Float          @default(0) // Selling price per unit
+  transpoFee        Float          @default(0) // Transportation/delivery cost per unit
   unit              String         @default("pcs") // e.g., "pcs", "kg", "pack"
-  imageUrl          String?
+  imageUrl          String?        // Base64 or URL
   expirationDate    DateTime?
   supplierId        String?
   supplier          Supplier?      @relation(fields: [supplierId], references: [id], onDelete: SetNull)
@@ -78,6 +81,7 @@ model SaleItem {
   productId   String
   product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   quantity    Float
+  costAtSale  Float    @default(0)
   priceAtSale Float
 }
 
@@ -105,20 +109,31 @@ model UtangRecord {
 }
 
 model StockHistory {
-  id        String   @id @default(cuid())
-  productId String
-  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
-  type      String   // "ADD", "DEDUCT", "ADJUST"
-  quantity  Float
-  reason    String?  // e.g., "RESTOCK", "SALE", "EXPIRED", "ADJUSTMENT"
-  createdAt DateTime @default(now())
+  id          String    @id @default(cuid())
+  productId   String
+  product     Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  type        String    // "ADD", "DEDUCT", "ADJUST", "LOSS"
+  quantity    Float
+  costPrice   Float?    @default(0)
+  transpoFee  Float?    @default(0)
+  supplierId  String?
+  supplier    Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  reason      String?   // e.g., "RESTOCK", "SALE", "EXPIRED", "DAMAGED", "LOST", "GIVEN_AWAY", "MANUAL_CORRECTION"
+  createdAt   DateTime  @default(now())
 }
 
 model Notification {
   id        String   @id @default(cuid())
-  type      String   // "LOW_STOCK", "EXPIRATION", "RESTOCK_SUGGESTION"
+  type      String   // "LOW_STOCK", "EXPIRATION", "RESTOCK_SUGGESTION", "LOSS_ALERT"
   title     String
   message   String
   read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model DailyWeatherLog {
+  id        String   @id @default(cuid())
+  date      String   @unique // YYYY-MM-DD
+  weather   String   // "HOT_SUNNY", "RAINY", "STORMY", "NORMAL"
   createdAt DateTime @default(now())
 }

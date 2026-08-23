@@ -14,13 +14,15 @@ interface PythonAnalyticsOutput {
   engine: string;
   seasonalMultiplier: number;
   seasonalFactorName: string;
+  weatherFactorName: string;
   fastMovers: any[];
   slowMovers: any[];
+  trends: any[];
   recommendations: any[];
   groceryShoppingList: any;
+  storeSummary: any;
 }
 
-// Executes Python OOP analytics engine via child_process
 function runPythonAnalyticsEngine(payload: any): Promise<PythonAnalyticsOutput> {
   return new Promise((resolve, reject) => {
     const scriptPath = path.join(process.cwd(), 'scripts', 'analytics_engine.py');
@@ -54,7 +56,6 @@ function runPythonAnalyticsEngine(payload: any): Promise<PythonAnalyticsOutput> 
       reject(err);
     });
 
-    // Send payload via stdin
     pyProcess.stdin.write(JSON.stringify(payload));
     pyProcess.stdin.end();
   });
@@ -68,13 +69,25 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const season = searchParams.get('season') || 'NORMAL';
+    let weather = searchParams.get('weather') || 'NORMAL';
+
+    // If weather not provided in query, check daily weather log in DB
+    if (weather === 'NORMAL') {
+      const todayStr = new Date().toISOString().split('T')[0];
+      const weatherLog = await prisma.dailyWeatherLog.findUnique({
+        where: { date: todayStr }
+      });
+      if (weatherLog) {
+        weather = weatherLog.weather;
+      }
+    }
 
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-    // 1. Calculate General Store KPIs
+    // 1. Fetch Store Data
     const [salesToday, salesMonth, products, customers] = await Promise.all([
       prisma.sale.aggregate({
         where: { saleDate: { gte: startOfToday } },
@@ -98,19 +111,31 @@ export async function GET(request: NextRequest) {
     const expiringItems = products.filter(p => p.expirationDate && p.expirationDate <= thirtyDaysFromNow);
     const totalUtang = customers.reduce((sum, c) => sum + c.balance, 0);
 
-    // 2. Fetch 30-day Sales Items for the Analytics Engine
+    // Calculate store profit and margin overview
+    const totalInventoryValue = products.reduce((sum, p) => sum + (p.stockQty * p.price), 0);
+    const totalInventoryCost = products.reduce((sum, p) => sum + (p.stockQty * (p.costPrice + p.transpoFee)), 0);
+    const potentialProfit = totalInventoryValue - totalInventoryCost;
+
+    // 2. Fetch 30-day Sales Items with timestamps for trends
     const saleItems = await prisma.saleItem.findMany({
       where: {
         sale: {
           saleDate: { gte: thirtyDaysAgo }
         }
       },
-      select: {
-        productId: true,
-        quantity: true,
-        priceAtSale: true
+      include: {
+        sale: {
+          select: { saleDate: true }
+        }
       }
     });
+
+    const flattenedSaleItems = saleItems.map(item => ({
+      productId: item.productId,
+      quantity: item.quantity,
+      priceAtSale: item.priceAtSale,
+      saleDate: item.sale.saleDate.toISOString()
+    }));
 
     // 3. 7-Day Chart Data
     const salesChartData = [];
@@ -138,64 +163,44 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // 4. Delegate to Python OOP Analytics Engine
+    // 4. Delegate to Python OOP Predictive Engine
     let pythonResult: PythonAnalyticsOutput | null = null;
     try {
       pythonResult = await runPythonAnalyticsEngine({
         seasonalFactor: season,
+        weatherFactor: weather,
         products,
-        salesItems: saleItems
+        salesItems: flattenedSaleItems
       });
     } catch (pyErr) {
-      console.warn('Python engine invocation notice (falling back to built-in TS logic):', pyErr);
+      console.warn('Python engine notice (fallback active):', pyErr);
     }
 
-    // Fallback if Python process failed
+    // Fallback if needed
     if (!pythonResult || !pythonResult.success) {
-      const productSalesMap: Record<string, { qty: number; sales: number; name: string; id: string }> = {};
-      for (const p of products) {
-        productSalesMap[p.id] = { qty: 0, sales: 0, name: p.name, id: p.id };
-      }
-      for (const item of saleItems) {
-        if (productSalesMap[item.productId]) {
-          productSalesMap[item.productId].qty += item.quantity;
-          productSalesMap[item.productId].sales += item.quantity * item.priceAtSale;
-        }
-      }
-      const salesList = Object.values(productSalesMap);
-      const fastMovers = [...salesList].filter(i => i.qty > 0).sort((a, b) => b.qty - a.qty).slice(0, 3);
-      const slowMovers = [...salesList].sort((a, b) => a.qty - b.qty).slice(0, 3);
-
-      const recs = products
-        .filter(p => p.stockQty <= p.lowStockThreshold)
-        .map(p => ({
-          productId: p.id,
-          productName: p.name,
-          categoryName: p.category?.name || 'General',
-          supplierName: p.supplier?.name || 'Direct Wholesale',
-          currentStock: p.stockQty,
-          lowStockThreshold: p.lowStockThreshold,
-          unit: p.unit,
-          estimatedCost: p.price * 10,
-          forecastedWeeklyDemand: 5,
-          recommendedRestockQty: Math.max(5, Math.ceil(p.lowStockThreshold * 2)),
-          reason: 'Low Stock Threshold'
-        }));
-
       pythonResult = {
         success: true,
-        engine: 'TypeScript-Fallback-v2',
+        engine: 'TypeScript-Fallback-v3',
         seasonalMultiplier: 1.0,
         seasonalFactorName: season,
-        fastMovers,
-        slowMovers,
-        recommendations: recs,
+        weatherFactorName: weather,
+        fastMovers: [],
+        slowMovers: [],
+        trends: [],
+        recommendations: [],
         groceryShoppingList: {
-          totalItemsCount: recs.length,
-          totalUnitsToBuy: recs.reduce((sum, r) => sum + r.recommendedRestockQty, 0),
-          totalEstimatedBudget: recs.reduce((sum, r) => sum + r.estimatedCost, 0),
-          items: recs,
-          groupedBySupplier: { 'Direct Wholesale': recs }
+          totalItemsCount: 0,
+          totalUnitsToBuy: 0,
+          totalEstimatedBudget: 0,
+          items: [],
+          groupedBySupplier: {}
+        },
+        storeSummary: {
+          headline: 'Store Intelligence Summary (Fallback)',
+          restockCount: lowStockItems.length,
+          expiryRiskCount: expiringItems.length,
+          summaryText: `${lowStockItems.length} items low on stock.`,
+          trends: []
         }
       };
     }
@@ -206,15 +211,21 @@ export async function GET(request: NextRequest) {
         monthSales: salesMonth._sum.totalAmount || 0,
         lowStockCount: lowStockItems.length,
         expiringCount: expiringItems.length,
-        totalUtang
+        totalUtang,
+        totalInventoryValue,
+        totalInventoryCost,
+        potentialProfit
       },
       engine: pythonResult.engine,
       seasonalMultiplier: pythonResult.seasonalMultiplier,
       seasonalFactorName: pythonResult.seasonalFactorName,
+      weatherFactorName: pythonResult.weatherFactorName,
       fastMovers: pythonResult.fastMovers,
       slowMovers: pythonResult.slowMovers,
+      trends: pythonResult.trends,
       recommendations: pythonResult.recommendations,
       groceryShoppingList: pythonResult.groceryShoppingList,
+      storeSummary: pythonResult.storeSummary,
       salesChartData
     });
   } catch (error: any) {

@@ -14,6 +14,11 @@ export async function GET() {
 
   try {
     const customers = await prisma.customer.findMany({
+      include: {
+        _count: {
+          select: { UtangRecords: true }
+        }
+      },
       orderBy: { name: 'asc' }
     });
     return NextResponse.json(customers);
@@ -31,18 +36,55 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { name, phone } = body;
 
-    if (!name) {
+    if (!name || !name.trim()) {
       return NextResponse.json({ error: 'Customer name is required' }, { status: 400 });
     }
 
     const customer = await prisma.customer.create({
       data: {
-        name,
-        phone,
+        name: name.trim(),
+        phone: phone ? phone.trim() : null,
         balance: 0
       }
     });
     return NextResponse.json(customer);
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  if (!(await isAuthenticated())) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  try {
+    const { searchParams } = new URL(request.url);
+    const id = searchParams.get('id');
+
+    if (!id) {
+      return NextResponse.json({ error: 'Customer ID is required' }, { status: 400 });
+    }
+
+    const customer = await prisma.customer.findUnique({
+      where: { id }
+    });
+
+    if (!customer) {
+      return NextResponse.json({ error: 'Customer not found' }, { status: 404 });
+    }
+
+    if (customer.balance > 0) {
+      return NextResponse.json({
+        error: `Cannot delete customer with an unpaid balance of ₱${customer.balance.toLocaleString()}. Please clear balance first.`
+      }, { status: 400 });
+    }
+
+    await prisma.customer.delete({
+      where: { id }
+    });
+
+    return NextResponse.json({ success: true });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
