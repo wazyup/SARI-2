@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useState, useEffect } from 'react';
+import { recordFeatureUsage } from '@/lib/featureTracker';
 
 interface SessionPayload {
   userId: string;
@@ -21,19 +22,12 @@ interface NotificationItem {
 }
 
 const navItems = [
-  { href: '/dashboard', label: 'Dashboard', icon: '📊' },
-  { href: '/inventory', label: 'Inventory', icon: '📦' },
-  { href: '/sales', label: 'Sales (POS)', icon: '🛍️' },
-  { href: '/utang', label: 'Utang Ledger', icon: '📝' },
-  { href: '/reports', label: 'Reports', icon: '📈' },
-  { href: '/settings', label: 'Settings', icon: '⚙️' },
-];
-
-const WEATHER_OPTIONS = [
-  { id: 'HOT_SUNNY', label: '☀️ Hot & Sunny', desc: 'Higher demand for cold drinks, ice & refreshments' },
-  { id: 'RAINY', label: '🌧️ Rainy Day', desc: 'Higher demand for instant noodles, coffee & hot soups' },
-  { id: 'STORMY', label: '⛈️ Stormy / Typhoon', desc: 'Higher demand for canned goods, noodles & essentials' },
-  { id: 'NORMAL', label: '🌤️ Normal Weather', desc: 'Standard baseline daily operations' }
+  { href: '/dashboard', label: 'Dashboard', key: 'dashboard' },
+  { href: '/inventory', label: 'Inventory', key: 'inventory' },
+  { href: '/sales', label: 'POS Checkout', key: 'pos' },
+  { href: '/utang', label: 'Utang & Credit Trust', key: 'utang' },
+  { href: '/reports', label: 'Reports & Audits', key: 'reports' },
+  { href: '/settings', label: 'Settings', key: 'settings' },
 ];
 
 export default function SidebarClient({ session }: { session: SessionPayload }) {
@@ -41,10 +35,6 @@ export default function SidebarClient({ session }: { session: SessionPayload }) 
   const router = useRouter();
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [showNotifModal, setShowNotifModal] = useState(false);
-  
-  // Weather prompt state
-  const [showWeatherPrompt, setShowWeatherPrompt] = useState(false);
-  const [selectedWeather, setSelectedWeather] = useState('HOT_SUNNY');
 
   const unreadNotifications = notifications.filter(n => !n.read);
 
@@ -59,39 +49,14 @@ export default function SidebarClient({ session }: { session: SessionPayload }) 
     }
   };
 
-  const checkDailyWeather = async () => {
-    try {
-      const res = await fetch('/api/weather');
-      if (res.ok) {
-        const data = await res.json();
-        if (!data.hasLoggedToday) {
-          setShowWeatherPrompt(true);
-        }
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
   useEffect(() => {
     fetchNotifications();
-    checkDailyWeather();
-    const interval = setInterval(fetchNotifications, 30000);
+    const interval = setInterval(fetchNotifications, 45000);
     return () => clearInterval(interval);
   }, []);
 
-  const handleSaveWeather = async () => {
-    try {
-      await fetch('/api/weather', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ weather: selectedWeather })
-      });
-      setShowWeatherPrompt(false);
-      router.refresh();
-    } catch (e) {
-      console.error(e);
-    }
+  const handleNavClick = (key: string) => {
+    recordFeatureUsage(key);
   };
 
   const handleLogout = async () => {
@@ -120,7 +85,21 @@ export default function SidebarClient({ session }: { session: SessionPayload }) 
       <aside className="sidebar">
         <div>
           <Link href="/dashboard" className="sidebar-logo">
-            <span>🏪</span> SARI 2
+            <span style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: '28px',
+              height: '28px',
+              background: 'var(--primary)',
+              borderRadius: '7px',
+              fontSize: '0.85rem',
+              fontWeight: 800,
+              color: '#fff'
+            }}>
+              S2
+            </span>
+            <span>SARI 2</span>
           </Link>
 
           <nav className="sidebar-nav">
@@ -130,9 +109,9 @@ export default function SidebarClient({ session }: { session: SessionPayload }) 
                 <Link
                   key={item.href}
                   href={item.href}
+                  onClick={() => handleNavClick(item.key)}
                   className={`nav-item ${isActive ? 'active' : ''}`}
                 >
-                  <span>{item.icon}</span>
                   <span>{item.label}</span>
                 </Link>
               );
@@ -141,8 +120,8 @@ export default function SidebarClient({ session }: { session: SessionPayload }) 
         </div>
 
         <div style={{
-          marginTop: '1.5rem',
-          paddingTop: '1.25rem',
+          marginTop: '1.25rem',
+          paddingTop: '1.1rem',
           borderTop: '1px solid var(--border-glass)',
         }}>
           {/* Notifications Quick Trigger */}
@@ -152,52 +131,49 @@ export default function SidebarClient({ session }: { session: SessionPayload }) 
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
-              padding: '0.65rem 0.85rem',
-              borderRadius: '10px',
-              background: unreadNotifications.length > 0 ? 'rgba(239, 68, 68, 0.15)' : 'rgba(255,255,255,0.03)',
-              border: unreadNotifications.length > 0 ? '1px solid rgba(239, 68, 68, 0.35)' : '1px solid var(--border-glass)',
+              padding: '0.55rem 0.75rem',
+              borderRadius: '8px',
+              background: unreadNotifications.length > 0 ? 'rgba(239, 68, 68, 0.12)' : 'rgba(255,255,255,0.02)',
+              border: unreadNotifications.length > 0 ? '1px solid rgba(239, 68, 68, 0.3)' : '1px solid var(--border-glass)',
               cursor: 'pointer',
-              marginBottom: '1rem',
+              marginBottom: '0.85rem',
               transition: 'var(--transition)'
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem', fontWeight: 600 }}>
-              <span>🔔</span>
-              <span>Alerts</span>
-            </div>
+            <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>System Alerts</span>
             {unreadNotifications.length > 0 ? (
               <span className="badge badge-danger">
-                {unreadNotifications.length} NEW
+                {unreadNotifications.length} New
               </span>
             ) : (
               <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>0</span>
             )}
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
             <div>
-              <p style={{ fontSize: '0.88rem', fontWeight: 700, color: 'var(--text-primary)' }}>{session.name}</p>
-              <p style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>Role: {session.role}</p>
+              <p style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-primary)' }}>{session.name}</p>
+              <p style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>Role: {session.role}</p>
             </div>
             <button
               onClick={handleLogout}
               className="btn btn-secondary"
-              style={{ width: '100%', padding: '0.5rem', fontSize: '0.8rem' }}
+              style={{ width: '100%', padding: '0.45rem', fontSize: '0.78rem' }}
             >
-              🔒 Lock / Sign Out
+              Sign Out / Lock
             </button>
           </div>
         </div>
       </aside>
 
-      {/* Large Notifications Modal */}
+      {/* Notifications Modal */}
       {showNotifModal && (
         <div className="modal-overlay" onClick={() => setShowNotifModal(false)}>
-          <div className="glass-panel modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
+          <div className="glass-panel modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '580px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-glass)', paddingBottom: '0.75rem', marginBottom: '1rem' }}>
-              <h2>🔔 System Alerts & Notifications</h2>
+              <h2 style={{ fontSize: '1.2rem' }}>System Alerts</h2>
               {unreadNotifications.length > 0 && (
-                <button onClick={markAllAsRead} className="btn btn-secondary" style={{ fontSize: '0.8rem' }}>
+                <button onClick={markAllAsRead} className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.35rem 0.65rem' }}>
                   Mark all as read
                 </button>
               )}
@@ -208,75 +184,37 @@ export default function SidebarClient({ session }: { session: SessionPayload }) 
                 No notifications logged.
               </p>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', maxHeight: '55vh', overflowY: 'auto' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem', maxHeight: '55vh', overflowY: 'auto' }}>
                 {notifications.map(n => (
                   <div
                     key={n.id}
                     style={{
-                      padding: '1rem',
-                      borderRadius: '10px',
-                      background: n.read ? 'rgba(255,255,255,0.02)' : 'rgba(99, 102, 241, 0.1)',
-                      borderLeft: `4px solid ${
+                      padding: '0.85rem 1rem',
+                      borderRadius: '8px',
+                      background: n.read ? 'rgba(255,255,255,0.02)' : 'rgba(79, 70, 229, 0.08)',
+                      borderLeft: `3px solid ${
                         n.type === 'LOW_STOCK' ? 'var(--warning)' : n.type === 'EXPIRATION' ? 'var(--danger)' : 'var(--primary)'
                       }`,
                       border: '1px solid var(--border-glass)'
                     }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div style={{ fontWeight: 700, fontSize: '0.95rem', color: 'var(--text-primary)' }}>{n.title}</div>
+                      <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-primary)' }}>{n.title}</div>
                       <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>
                         {new Date(n.createdAt).toLocaleDateString()}
                       </span>
                     </div>
-                    <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '0.35rem' }}>{n.message}</p>
+                    <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginTop: '0.25rem' }}>{n.message}</p>
                   </div>
                 ))}
               </div>
             )}
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '1.25rem' }}>
-              <button onClick={() => setShowNotifModal(false)} className="btn btn-primary">
+              <button onClick={() => setShowNotifModal(false)} className="btn btn-primary" style={{ padding: '0.45rem 1rem' }}>
                 Close
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* Daily Weather Morning Question Modal */}
-      {showWeatherPrompt && (
-        <div className="modal-overlay">
-          <div className="glass-panel modal-content" style={{ maxWidth: '500px' }}>
-            <div style={{ textAlign: 'center', marginBottom: '1.25rem' }}>
-              <h2 style={{ fontSize: '1.4rem' }}>🌤️ Good Morning! What's the weather today?</h2>
-              <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '0.25rem' }}>
-                SARI 2 will adapt product restock recommendations and predictive demand based on today's forecast.
-              </p>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
-              {WEATHER_OPTIONS.map(w => (
-                <div
-                  key={w.id}
-                  onClick={() => setSelectedWeather(w.id)}
-                  style={{
-                    padding: '0.85rem 1rem',
-                    borderRadius: '10px',
-                    cursor: 'pointer',
-                    background: selectedWeather === w.id ? 'rgba(99, 102, 241, 0.2)' : 'rgba(255, 255, 255, 0.02)',
-                    border: selectedWeather === w.id ? '1.5px solid var(--primary)' : '1px solid var(--border-glass)',
-                    transition: 'var(--transition)'
-                  }}
-                >
-                  <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>{w.label}</div>
-                  <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>{w.desc}</div>
-                </div>
-              ))}
-            </div>
-
-            <button onClick={handleSaveWeather} className="btn btn-primary" style={{ width: '100%', padding: '0.8rem' }}>
-              Save Weather & Open Store Engine
-            </button>
           </div>
         </div>
       )}

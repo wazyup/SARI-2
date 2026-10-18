@@ -14,10 +14,10 @@ interface PythonAnalyticsOutput {
   engine: string;
   seasonalMultiplier: number;
   seasonalFactorName: string;
-  weatherFactorName: string;
   fastMovers: any[];
   slowMovers: any[];
   trends: any[];
+  associations: any[];
   recommendations: any[];
   groceryShoppingList: any;
   storeSummary: any;
@@ -69,18 +69,6 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const season = searchParams.get('season') || 'NORMAL';
-    let weather = searchParams.get('weather') || 'NORMAL';
-
-    // If weather not provided in query, check daily weather log in DB
-    if (weather === 'NORMAL') {
-      const todayStr = new Date().toISOString().split('T')[0];
-      const weatherLog = await prisma.dailyWeatherLog.findUnique({
-        where: { date: todayStr }
-      });
-      if (weatherLog) {
-        weather = weatherLog.weather;
-      }
-    }
 
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -116,7 +104,7 @@ export async function GET(request: NextRequest) {
     const totalInventoryCost = products.reduce((sum, p) => sum + (p.stockQty * (p.costPrice + p.transpoFee)), 0);
     const potentialProfit = totalInventoryValue - totalInventoryCost;
 
-    // 2. Fetch 30-day Sales Items with timestamps for trends
+    // 2. Fetch 30-day Sales Items with timestamps and basket context
     const saleItems = await prisma.saleItem.findMany({
       where: {
         sale: {
@@ -125,13 +113,18 @@ export async function GET(request: NextRequest) {
       },
       include: {
         sale: {
-          select: { saleDate: true }
+          select: { id: true, saleDate: true }
+        },
+        product: {
+          select: { name: true }
         }
       }
     });
 
     const flattenedSaleItems = saleItems.map(item => ({
+      saleId: item.sale.id,
       productId: item.productId,
+      productName: item.product?.name,
       quantity: item.quantity,
       priceAtSale: item.priceAtSale,
       saleDate: item.sale.saleDate.toISOString()
@@ -163,12 +156,11 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // 4. Delegate to Python OOP Predictive Engine
+    // 4. Delegate to Python EOQ & Dynamic Min-Max Predictive Engine
     let pythonResult: PythonAnalyticsOutput | null = null;
     try {
       pythonResult = await runPythonAnalyticsEngine({
         seasonalFactor: season,
-        weatherFactor: weather,
         products,
         salesItems: flattenedSaleItems
       });
@@ -176,30 +168,62 @@ export async function GET(request: NextRequest) {
       console.warn('Python engine notice (fallback active):', pyErr);
     }
 
-    // Fallback if needed
+    // High quality Fallback if needed
     if (!pythonResult || !pythonResult.success) {
+      const recs = products
+        .filter(p => p.stockQty <= p.lowStockThreshold)
+        .map(p => {
+          const eoq = Math.max(5, Math.ceil(p.lowStockThreshold * 2.5));
+          const minStock = p.lowStockThreshold + 3;
+          const maxStock = minStock + eoq;
+          const buyQty = Math.max(1, maxStock - p.stockQty);
+          return {
+            productId: p.id,
+            productName: p.name,
+            categoryName: p.category?.name || 'General',
+            supplierName: p.supplier?.name || 'Direct Wholesale',
+            currentStock: p.stockQty,
+            costPrice: p.costPrice,
+            transpoFee: p.transpoFee,
+            unitPrice: p.price,
+            profitPerUnit: p.price - (p.costPrice + p.transpoFee),
+            profitMarginPct: p.price > 0 ? Math.round(((p.price - (p.costPrice + p.transpoFee)) / p.price) * 100) : 0,
+            lowStockThreshold: p.lowStockThreshold,
+            unit: p.unit,
+            action: 'RESTOCK',
+            recommendedRestockQty: buyQty,
+            eoqQuantity: eoq,
+            minTargetStock: minStock,
+            maxTargetStock: maxStock,
+            estimatedCost: buyQty * (p.costPrice + p.transpoFee),
+            forecastedWeeklyDemand: 5,
+            message: `Order ${buyQty} ${p.unit}(s) (Min: ${minStock}, Max: ${maxStock})`,
+            reason: 'Low Stock Threshold Reached'
+          };
+        });
+
       pythonResult = {
         success: true,
-        engine: 'TypeScript-Fallback-v3',
+        engine: 'TypeScript-EOQ-Fallback-v4',
         seasonalMultiplier: 1.0,
         seasonalFactorName: season,
-        weatherFactorName: weather,
         fastMovers: [],
         slowMovers: [],
         trends: [],
-        recommendations: [],
+        associations: [],
+        recommendations: recs,
         groceryShoppingList: {
-          totalItemsCount: 0,
-          totalUnitsToBuy: 0,
-          totalEstimatedBudget: 0,
-          items: [],
-          groupedBySupplier: {}
+          totalItemsCount: recs.length,
+          totalUnitsToBuy: recs.reduce((sum, r) => sum + r.recommendedRestockQty, 0),
+          totalEstimatedBudget: recs.reduce((sum, r) => sum + r.estimatedCost, 0),
+          items: recs,
+          groupedBySupplier: { 'Direct Wholesale': recs }
         },
         storeSummary: {
-          headline: 'Store Intelligence Summary (Fallback)',
-          restockCount: lowStockItems.length,
+          headline: `Store Overview — ${season} Replenishment Pacing`,
+          restockCount: recs.length,
           expiryRiskCount: expiringItems.length,
-          summaryText: `${lowStockItems.length} items low on stock.`,
+          summaryText: `${recs.length} items flagged for replenishment based on safety stock levels.`,
           trends: []
         }
       };
@@ -219,10 +243,10 @@ export async function GET(request: NextRequest) {
       engine: pythonResult.engine,
       seasonalMultiplier: pythonResult.seasonalMultiplier,
       seasonalFactorName: pythonResult.seasonalFactorName,
-      weatherFactorName: pythonResult.weatherFactorName,
       fastMovers: pythonResult.fastMovers,
       slowMovers: pythonResult.slowMovers,
       trends: pythonResult.trends,
+      associations: pythonResult.associations || [],
       recommendations: pythonResult.recommendations,
       groceryShoppingList: pythonResult.groceryShoppingList,
       storeSummary: pythonResult.storeSummary,

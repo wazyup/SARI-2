@@ -1,6 +1,9 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
+import { recordFeatureUsage } from '@/lib/featureTracker';
 
 interface SaleItem {
   id: string;
@@ -33,10 +36,12 @@ interface Sale {
 export default function ReportsClient() {
   const [sales, setSales] = useState<Sale[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
   const [filterRange, setFilterRange] = useState<'ALL' | 'TODAY' | 'WEEK' | 'MONTH'>('ALL');
   const [showGuide, setShowGuide] = useState(false);
 
   useEffect(() => {
+    recordFeatureUsage('reports');
     fetch('/api/sales')
       .then(res => res.json())
       .then(data => {
@@ -90,38 +95,141 @@ export default function ReportsClient() {
     document.body.removeChild(link);
   };
 
+  const handleDownloadFullDailyPdf = async () => {
+    try {
+      setIsGeneratingPdf(true);
+      const res = await fetch('/api/reports/daily-audit');
+      if (!res.ok) throw new Error('Failed to load audit telemetry');
+      const audit = await res.json();
+
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+
+      // Header
+      doc.setFontSize(18);
+      doc.setTextColor(33, 43, 54);
+      doc.text('SARI 2 — Complete Store Operations & Audit Report', 14, 18);
+      doc.setFontSize(10);
+      doc.setTextColor(100);
+      doc.text(`Generated on: ${audit.reportDate} | System Date: ${new Date().toLocaleTimeString()}`, 14, 25);
+
+      // Section 1: Business Model & Financial Overview
+      const f = audit.financialOverview;
+      doc.setFontSize(12);
+      doc.setTextColor(15, 23, 42);
+      doc.text('1. Business Model & Financial Valuation', 14, 34);
+
+      const finData = [
+        ['Total Tracked Inventory Value (Retail)', `PHP ${f.totalInventoryValue.toLocaleString()}`],
+        ['Total Sourcing Cost (Capital + Logistics Transpo)', `PHP ${f.totalInventoryCost.toLocaleString()}`],
+        ['Embedded Transportation/Delivery Fees', `PHP ${f.totalTranspoEmbedded.toLocaleString()}`],
+        ['Projected Inventory Profit Margin', `PHP ${f.projectedGrossProfit.toLocaleString()} (${f.grossMarginPercentage}%)`],
+        ['Today\'s Gross Revenue', `PHP ${f.revenueToday.toLocaleString()}`],
+        ['Cash Collected Today', `PHP ${f.cashToday.toLocaleString()}`],
+        ['Credit (Utang) Created Today', `PHP ${f.creditToday.toLocaleString()}`],
+        ['Total Outstanding Customer Receivables', `PHP ${f.totalReceivableDebt.toLocaleString()}`],
+        ['Stock Loss / Damaged Goods Today', `PHP ${f.totalLossCostToday.toLocaleString()}`],
+      ];
+
+      autoTable(doc, {
+        startY: 38,
+        head: [['Metric', 'Amount (PHP)']],
+        body: finData,
+        theme: 'striped',
+        styles: { fontSize: 8.5 },
+        headStyles: { fillColor: [79, 70, 229] },
+      });
+
+      // Section 2: Sales Transactions Log Today
+      const afterFinY = (doc as any).lastAutoTable.finalY + 10;
+      doc.text('2. Today\'s Sales & Cashflow Log', 14, afterFinY);
+
+      const salesRows = audit.sales.length === 0
+        ? [['No sales recorded today', '—', '—', 'PHP 0.00']]
+        : audit.sales.map((s: any) => [s.time, s.paymentMethod, s.itemsSummary, `PHP ${s.totalAmount.toLocaleString()}`]);
+
+      autoTable(doc, {
+        startY: afterFinY + 4,
+        head: [['Time', 'Payment', 'Items Summary', 'Total']],
+        body: salesRows,
+        theme: 'striped',
+        styles: { fontSize: 8 },
+        headStyles: { fillColor: [14, 165, 233] },
+      });
+
+      // Section 3: Active Utang & Customer Balances
+      const afterSalesY = (doc as any).lastAutoTable.finalY + 10;
+      doc.text('3. Customer Credit Ledger (Receivable Balances)', 14, afterSalesY);
+
+      const debtorRows = audit.debtors.length === 0
+        ? [['All customer credit accounts are fully settled', '—', 'PHP 0.00']]
+        : audit.debtors.map((d: any) => [d.name, d.phone, `PHP ${d.balance.toLocaleString()}`]);
+
+      autoTable(doc, {
+        startY: afterSalesY + 4,
+        head: [['Customer Name', 'Contact Number', 'Balance Due']],
+        body: debtorRows,
+        theme: 'striped',
+        styles: { fontSize: 8 },
+        headStyles: { fillColor: [245, 158, 11] },
+      });
+
+      // Section 4: Inventory Adjustments, Restock & Losses
+      doc.addPage();
+      doc.text('4. Stock Adjustments, Losses & Inventory Restock History', 14, 18);
+
+      const adjRows = audit.adjustments.length === 0
+        ? [['No adjustments or losses recorded today', '—', '—', '—']]
+        : audit.adjustments.map((a: any) => [a.time, a.productName, `${a.type} (${a.quantity})`, a.reason]);
+
+      autoTable(doc, {
+        startY: 22,
+        head: [['Time', 'Product', 'Adjustment Type & Qty', 'Reason / Classification']],
+        body: adjRows,
+        theme: 'striped',
+        styles: { fontSize: 8 },
+        headStyles: { fillColor: [239, 68, 68] },
+      });
+
+      doc.save(`SARI2_Full_Daily_Report_${new Date().toISOString().split('T')[0]}.pdf`);
+    } catch (err) {
+      console.error(err);
+      alert('Failed to generate full daily report PDF');
+    } finally {
+      setIsGeneratingPdf(false);
+    }
+  };
+
   return (
     <div>
       <div className="page-header">
         <div>
           <h1 className="page-title">Store Reports & Audits</h1>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-            Daily, weekly, and monthly sales telemetry with printable PDF reports and CSV export.
+            Multi-period sales telemetry, downloadable daily PDF audits, and spreadsheet export.
           </p>
         </div>
         <div className="header-actions">
           <button onClick={() => setShowGuide(!showGuide)} className="btn btn-secondary">
-            📖 {showGuide ? 'Hide Guide' : 'How to Use'}
+            {showGuide ? 'Hide Guide' : 'How to Use'}
           </button>
           <button onClick={handleExportCSV} className="btn btn-secondary" disabled={filteredSales.length === 0}>
-            📤 Export CSV
+            Export CSV
           </button>
-          <button onClick={() => window.print()} className="btn btn-primary">
-            📄 Print / Save Daily PDF
+          <button onClick={handleDownloadFullDailyPdf} disabled={isGeneratingPdf} className="btn btn-primary">
+            {isGeneratingPdf ? 'Generating PDF...' : 'Download Full Daily PDF'}
           </button>
         </div>
       </div>
 
-      {/* Tutorial / Quick Guide Box */}
       {showGuide && (
         <div className="tutorial-box">
-          <span style={{ fontSize: '1.5rem' }}>💡</span>
           <div style={{ flex: 1 }}>
-            <h4 style={{ color: 'var(--text-primary)', marginBottom: '0.25rem' }}>Reports & PDF Export Guide</h4>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', lineHeight: 1.5 }}>
-              1. <strong>Filter by Time:</strong> Select <em>Today</em>, <em>Last 7 Days</em>, or <em>This Month</em> to isolate your revenue window.<br />
-              2. <strong>Save Daily PDF Report:</strong> Click <em>Print / Save Daily PDF</em> to generate a formal summary document.<br />
-              3. <strong>Cash vs Credit Breakdown:</strong> Compare liquid cash in the drawer vs outstanding customer utang created during the period.
+            <h4 style={{ color: 'var(--text-primary)', marginBottom: '0.25rem' }}>Reports & Audit Guide</h4>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', lineHeight: 1.45 }}>
+              1. <strong>Download Full Daily PDF:</strong> Generates a formal, printable PDF audit compiling inventory valuations, embedded transpo fees, today's sales, utang debtors, and stock loss adjustments.<br />
+              2. <strong>Date Filters:</strong> Filter the sales log below between Today, Last 7 Days, or This Month.<br />
+              3. <strong>CSV Export:</strong> Exports raw transaction rows for spreadsheet bookkeeping.
             </p>
           </div>
         </div>
@@ -135,46 +243,46 @@ export default function ReportsClient() {
           <div className="kpi-desc">Total sales within filter</div>
         </div>
 
-        <div className="glass-panel kpi-card" style={{ borderLeft: '4px solid var(--success)' }}>
+        <div className="glass-panel kpi-card" style={{ borderLeft: '3px solid var(--success)' }}>
           <div className="kpi-title">Cash Sales</div>
           <div className="kpi-value">₱{totalCashSales.toLocaleString()}</div>
           <div className="kpi-desc">Liquid cash collected</div>
         </div>
 
-        <div className="glass-panel kpi-card" style={{ borderLeft: '4px solid var(--warning)' }}>
+        <div className="glass-panel kpi-card" style={{ borderLeft: '3px solid var(--warning)' }}>
           <div className="kpi-title">Credit Sales (Utang)</div>
           <div className="kpi-value">₱{totalCreditSales.toLocaleString()}</div>
-          <div className="kpi-desc">Credit posted to customer ledgers</div>
+          <div className="kpi-desc">Customer credit balance created</div>
         </div>
       </div>
 
       {/* Date Filter Bar */}
-      <div className="glass-panel" style={{ padding: '0.85rem', display: 'flex', gap: '0.5rem', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
+      <div className="glass-panel" style={{ padding: '0.75rem', display: 'flex', gap: '0.45rem', marginBottom: '1.15rem', flexWrap: 'wrap' }}>
         <button
           onClick={() => setFilterRange('ALL')}
           className={`btn ${filterRange === 'ALL' ? 'btn-primary' : 'btn-secondary'}`}
-          style={{ padding: '0.45rem 0.85rem', fontSize: '0.82rem' }}
+          style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}
         >
           All Time
         </button>
         <button
           onClick={() => setFilterRange('TODAY')}
           className={`btn ${filterRange === 'TODAY' ? 'btn-primary' : 'btn-secondary'}`}
-          style={{ padding: '0.45rem 0.85rem', fontSize: '0.82rem' }}
+          style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}
         >
           Today
         </button>
         <button
           onClick={() => setFilterRange('WEEK')}
           className={`btn ${filterRange === 'WEEK' ? 'btn-primary' : 'btn-secondary'}`}
-          style={{ padding: '0.45rem 0.85rem', fontSize: '0.82rem' }}
+          style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}
         >
           Last 7 Days
         </button>
         <button
           onClick={() => setFilterRange('MONTH')}
           className={`btn ${filterRange === 'MONTH' ? 'btn-primary' : 'btn-secondary'}`}
-          style={{ padding: '0.45rem 0.85rem', fontSize: '0.82rem' }}
+          style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}
         >
           This Month
         </button>
@@ -182,7 +290,7 @@ export default function ReportsClient() {
 
       {/* Sales Logs Table */}
       {loading ? (
-        <p style={{ color: 'var(--text-muted)' }}>Loading logs...</p>
+        <p style={{ color: 'var(--text-muted)' }}>Loading transaction logs...</p>
       ) : (
         <div className="glass-panel table-container">
           <table className="custom-table">
@@ -205,13 +313,13 @@ export default function ReportsClient() {
               ) : (
                 filteredSales.map(s => (
                   <tr key={s.id}>
-                    <td style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+                    <td style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
                       {new Date(s.saleDate).toLocaleString()}
                     </td>
                     <td>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
                         {s.Items.map(item => (
-                          <div key={item.id} style={{ fontSize: '0.85rem' }}>
+                          <div key={item.id} style={{ fontSize: '0.82rem' }}>
                             <span style={{ fontWeight: 600 }}>{item.product?.name}</span> × {item.quantity}
                           </div>
                         ))}
@@ -225,7 +333,7 @@ export default function ReportsClient() {
                     <td style={{ color: 'var(--text-muted)' }}>
                       {s.paymentMethod === 'CREDIT' ? s.UtangRecords[0]?.customer?.name || 'Customer' : '—'}
                     </td>
-                    <td style={{ fontWeight: 800, color: 'var(--secondary)' }}>
+                    <td style={{ fontWeight: 700, color: 'var(--secondary)' }}>
                       ₱{s.totalAmount.toLocaleString()}
                     </td>
                   </tr>

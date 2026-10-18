@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { recordFeatureUsage, logStoreEdit } from '@/lib/featureTracker';
 
 interface Category {
   id: string;
@@ -64,7 +65,6 @@ export default function SalesClient() {
       if (custRes.ok) {
         const custs = await custRes.json();
         setCustomers(custs);
-        // Customer Memory: Remember last selected customer
         const lastCust = localStorage.getItem('sari2_last_customer_id');
         if (lastCust && custs.some((c: Customer) => c.id === lastCust)) {
           setCustomerId(lastCust);
@@ -78,6 +78,7 @@ export default function SalesClient() {
   };
 
   useEffect(() => {
+    recordFeatureUsage('pos');
     loadData();
   }, []);
 
@@ -142,6 +143,7 @@ export default function SalesClient() {
         setCustomers(prev => [...prev, data]);
         setCustomerId(data.id);
         localStorage.setItem('sari2_last_customer_id', data.id);
+        logStoreEdit('POS Checkout', 'Created Customer', `Registered customer: ${data.name}`, 'UTANG');
         setNewCustomerName('');
         setNewCustomerPhone('');
       }
@@ -190,7 +192,14 @@ export default function SalesClient() {
       });
 
       if (res.ok) {
-        alert('Transaction completed successfully!');
+        const itemSummary = cart.map(i => `${i.product.name} (x${i.quantity})`).join(', ');
+        logStoreEdit(
+          'POS Checkout',
+          `Sale Completed (${paymentMethod})`,
+          `Total ₱${totalAmount.toLocaleString()} — ${itemSummary}`,
+          'STOCK'
+        );
+        alert('Transaction completed successfully.');
         if (customerId) {
           localStorage.setItem('sari2_last_customer_id', customerId);
         }
@@ -223,26 +232,24 @@ export default function SalesClient() {
         <div>
           <h1 className="page-title">Point of Sale (POS)</h1>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-            Fast checkout, instant stock deduction, and seamless credit (utang) attachment.
+            Fast checkout, instant stock deduction, and customer credit ledger integration.
           </p>
         </div>
         <div className="header-actions">
           <button onClick={() => setShowGuide(!showGuide)} className="btn btn-secondary">
-            📖 {showGuide ? 'Hide Guide' : 'How to Use'}
+            {showGuide ? 'Hide Guide' : 'How to Use'}
           </button>
         </div>
       </div>
 
-      {/* Tutorial / Quick Guide Box */}
       {showGuide && (
         <div className="tutorial-box">
-          <span style={{ fontSize: '1.5rem' }}>💡</span>
           <div style={{ flex: 1 }}>
             <h4 style={{ color: 'var(--text-primary)', marginBottom: '0.25rem' }}>POS Checkout Guide</h4>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', lineHeight: 1.5 }}>
-              1. <strong>Add to Cart:</strong> Tap any product card on the left to add it to the active transaction.<br />
-              2. <strong>Cash Checkout:</strong> Enter amount handed by the buyer; change is calculated automatically.<br />
-              3. <strong>Credit (Utang) Checkout:</strong> Select <em>Credit</em>, choose or create the customer name, and the sale will post directly to their ledger.
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', lineHeight: 1.45 }}>
+              1. Tap any product card on the left to add items to your active cart.<br />
+              2. For cash purchases, enter the amount handed over to calculate change immediately.<br />
+              3. For credit (utang), choose the customer name from the dropdown. The transaction will post to their ledger.
             </p>
           </div>
         </div>
@@ -251,7 +258,7 @@ export default function SalesClient() {
       <div className="pos-layout">
         {/* Products List Pane */}
         <div className="pos-products">
-          <div className="glass-panel" style={{ padding: '0.75rem', display: 'flex', gap: '0.5rem' }}>
+          <div className="glass-panel" style={{ padding: '0.65rem', display: 'flex', gap: '0.5rem' }}>
             <div className="search-bar-container" style={{ flex: 1 }}>
               <input
                 type="text"
@@ -260,8 +267,8 @@ export default function SalesClient() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
-              <button className="btn btn-secondary" style={{ padding: '0.65rem 0.85rem' }}>
-                🔍
+              <button className="btn btn-secondary" style={{ padding: '0.6rem 0.8rem' }}>
+                Search
               </button>
             </div>
 
@@ -289,12 +296,12 @@ export default function SalesClient() {
                     alt={p.name}
                     className="pos-card-img"
                   />
-                  <div style={{ fontWeight: 700, fontSize: '0.85rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  <div style={{ fontWeight: 600, fontSize: '0.85rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {p.name}
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 'auto' }}>
-                    <span style={{ fontWeight: 800, color: 'var(--secondary)' }}>₱{p.price}</span>
-                    <span style={{ fontSize: '0.7rem', color: p.stockQty <= 5 ? 'var(--danger)' : 'var(--text-dim)' }}>
+                    <span style={{ fontWeight: 700, color: 'var(--secondary)' }}>₱{p.price}</span>
+                    <span style={{ fontSize: '0.68rem', color: p.stockQty <= 5 ? 'var(--danger)' : 'var(--text-dim)' }}>
                       Stock: {p.stockQty}
                     </span>
                   </div>
@@ -307,7 +314,7 @@ export default function SalesClient() {
         {/* Checkout Cart Pane */}
         <div className="glass-panel pos-cart">
           <div>
-            <h3 style={{ borderBottom: '1px solid var(--border-glass)', paddingBottom: '0.75rem', fontSize: '1.05rem' }}>Active Cart ({cart.length})</h3>
+            <h3 style={{ borderBottom: '1px solid var(--border-glass)', paddingBottom: '0.65rem', fontSize: '1rem' }}>Active Cart ({cart.length})</h3>
             
             {cart.length === 0 ? (
               <div style={{ padding: '3rem 0', textAlign: 'center', color: 'var(--text-dim)' }}>
@@ -318,23 +325,23 @@ export default function SalesClient() {
                 {cart.map(item => (
                   <div key={item.product.id} className="cart-item">
                     <div style={{ flex: 1, minWidth: 0, marginRight: '0.5rem' }}>
-                      <div style={{ fontWeight: 600, fontSize: '0.9rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      <div style={{ fontWeight: 600, fontSize: '0.88rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {item.product.name}
                       </div>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                      <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
                         ₱{item.product.price} × {item.quantity}
                       </div>
                     </div>
 
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
                       <input
                         type="number"
                         className="form-control"
                         value={item.quantity}
                         onChange={(e) => updateQuantity(item.product.id, parseInt(e.target.value) || 0)}
-                        style={{ width: '55px', padding: '0.25rem 0.4rem', textAlign: 'center' }}
+                        style={{ width: '50px', padding: '0.2rem 0.35rem', textAlign: 'center' }}
                       />
-                      <button onClick={() => removeFromCart(item.product.id)} className="btn btn-danger" style={{ padding: '0.25rem 0.5rem' }}>
+                      <button onClick={() => removeFromCart(item.product.id)} className="btn btn-danger" style={{ padding: '0.2rem 0.45rem', fontSize: '0.75rem' }}>
                         ✕
                       </button>
                     </div>
@@ -345,24 +352,24 @@ export default function SalesClient() {
           </div>
 
           {/* Checkout Controls */}
-          <div style={{ borderTop: '1px solid var(--border-glass)', paddingTop: '0.85rem', marginTop: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '1.25rem', fontWeight: 800, marginBottom: '0.85rem' }}>
+          <div style={{ borderTop: '1px solid var(--border-glass)', paddingTop: '0.75rem', marginTop: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '1.2rem', fontWeight: 800, marginBottom: '0.75rem' }}>
               <span>Total:</span>
               <span style={{ color: 'var(--secondary)' }}>₱{totalAmount.toLocaleString()}</span>
             </div>
 
             {cart.length > 0 && (
-              <form onSubmit={handleCheckout} style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+              <form onSubmit={handleCheckout} style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                 <div className="form-group" style={{ marginBottom: 0 }}>
                   <label className="form-label">Payment Method</label>
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <div style={{ display: 'flex', gap: '0.45rem' }}>
                     <button
                       type="button"
                       className={`btn ${paymentMethod === 'CASH' ? 'btn-primary' : 'btn-secondary'}`}
                       onClick={() => setPaymentMethod('CASH')}
                       style={{ flex: 1 }}
                     >
-                      💵 Cash
+                      Cash
                     </button>
                     <button
                       type="button"
@@ -370,13 +377,13 @@ export default function SalesClient() {
                       onClick={() => setPaymentMethod('CREDIT')}
                       style={{ flex: 1 }}
                     >
-                      📝 Credit (Utang)
+                      Credit (Utang)
                     </button>
                   </div>
                 </div>
 
                 {paymentMethod === 'CASH' ? (
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.65rem' }}>
                     <div className="form-group" style={{ marginBottom: 0 }}>
                       <label className="form-label">Cash Received (₱)</label>
                       <input
@@ -399,7 +406,7 @@ export default function SalesClient() {
                 ) : (
                   <div className="form-group" style={{ marginBottom: 0 }}>
                     <label className="form-label">Customer (Utang Memory)</label>
-                    <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                    <div style={{ display: 'flex', gap: '0.45rem', marginBottom: '0.45rem' }}>
                       <select
                         className="form-control"
                         value={customerId}
@@ -416,7 +423,6 @@ export default function SalesClient() {
                       </select>
                     </div>
 
-                    {/* Quick Add Customer */}
                     <div style={{ display: 'flex', gap: '0.25rem' }}>
                       <input
                         type="text"
@@ -424,7 +430,7 @@ export default function SalesClient() {
                         placeholder="Add new customer..."
                         value={newCustomerName}
                         onChange={(e) => setNewCustomerName(e.target.value)}
-                        style={{ fontSize: '0.82rem' }}
+                        style={{ fontSize: '0.8rem' }}
                       />
                       <button type="button" onClick={handleCreateCustomer} className="btn btn-secondary" style={{ padding: '0.25rem 0.55rem', fontSize: '0.75rem' }}>
                         Add
@@ -433,7 +439,7 @@ export default function SalesClient() {
                   </div>
                 )}
 
-                <button type="submit" className="btn btn-primary" style={{ width: '100%', padding: '0.8rem' }}>
+                <button type="submit" className="btn btn-primary" style={{ width: '100%', padding: '0.75rem' }}>
                   Complete Checkout
                 </button>
               </form>

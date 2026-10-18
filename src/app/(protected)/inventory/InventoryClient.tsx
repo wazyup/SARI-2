@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { recordFeatureUsage, logStoreEdit } from '@/lib/featureTracker';
 
 interface Category {
   id: string;
@@ -50,11 +51,14 @@ export default function InventoryClient() {
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [history, setHistory] = useState<StockHistoryItem[]>([]);
   
-  const [activeTab, setActiveTab] = useState<'PRODUCTS' | 'HISTORY' | 'LOSSES'>('PRODUCTS');
+  const [activeTab, setActiveTab] = useState<'PRODUCTS' | 'AUDIT' | 'HISTORY' | 'LOSSES'>('PRODUCTS');
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [loading, setLoading] = useState(true);
-  const [showGuide, setShowGuide] = useState(true);
+
+  // Fast Count / Rapid Audit State
+  const [countAuditMap, setCountAuditMap] = useState<Record<string, number>>({});
+  const [isSubmittingAudit, setIsSubmittingAudit] = useState(false);
 
   // Modals
   const [showModal, setShowModal] = useState(false);
@@ -94,7 +98,16 @@ export default function InventoryClient() {
         fetch('/api/stock-history')
       ]);
 
-      if (prodRes.ok) setProducts(await prodRes.json());
+      if (prodRes.ok) {
+        const prodData: Product[] = await prodRes.json();
+        setProducts(prodData);
+        // Initialize fast count map with current physical quantities
+        const countMap: Record<string, number> = {};
+        prodData.forEach(p => {
+          countMap[p.id] = p.stockQty;
+        });
+        setCountAuditMap(countMap);
+      }
       if (catRes.ok) setCategories(await catRes.json());
       if (supRes.ok) setSuppliers(await supRes.json());
       if (histRes.ok) setHistory(await histRes.json());
@@ -106,10 +119,19 @@ export default function InventoryClient() {
   };
 
   useEffect(() => {
+    recordFeatureUsage('inventory');
     loadData();
+
+    // Check query params for tab navigation (e.g. from shortcut)
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get('tab');
+      if (tabParam === 'AUDIT' || tabParam === 'LOSSES' || tabParam === 'HISTORY') {
+        setActiveTab(tabParam as any);
+      }
+    }
   }, []);
 
-  // Handle Camera / File Upload converting to Base64
   const handleImageFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -191,6 +213,12 @@ export default function InventoryClient() {
       });
 
       if (res.ok) {
+        logStoreEdit(
+          'Inventory',
+          editingProduct ? 'Updated Product & Price' : 'Created Product',
+          `${name} — Price: ₱${price}, Cost: ₱${costPrice}, Transpo: ₱${transpoFee}, Stock: ${stockQty}`,
+          editingProduct ? 'PRICE' : 'PRODUCT'
+        );
         setShowModal(false);
         loadData();
       } else {
@@ -219,7 +247,13 @@ export default function InventoryClient() {
       });
 
       if (res.ok) {
-        alert('Loss recorded successfully.');
+        logStoreEdit(
+          'Inventory Loss',
+          `Loss: ${lossReason}`,
+          `${lossQty} ${lossProduct.unit}(s) of ${lossProduct.name}`,
+          'LOSS'
+        );
+        alert('Stock loss recorded.');
         setShowLossModal(false);
         loadData();
       } else {
@@ -232,11 +266,13 @@ export default function InventoryClient() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this product?')) return;
+    const p = products.find(prod => prod.id === id);
+    if (!confirm(`Are you sure you want to delete ${p?.name || 'this product'}?`)) return;
 
     try {
       const res = await fetch(`/api/products?id=${id}`, { method: 'DELETE' });
       if (res.ok) {
+        logStoreEdit('Inventory', 'Deleted Product', `Deleted item: ${p?.name || id}`, 'PRODUCT');
         loadData();
       }
     } catch (e) {
@@ -244,41 +280,59 @@ export default function InventoryClient() {
     }
   };
 
-  const handleCreateCategory = async () => {
-    if (!newCatName.trim()) return;
-    try {
-      const res = await fetch('/api/categories', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newCatName.trim() })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setCategories(prev => [...prev, data]);
-        setCategoryId(data.id);
-        setNewCatName('');
-      }
-    } catch (e) {
-      console.error(e);
-    }
+  // Fast Counting Batch Submission
+  const handleQuickCountChange = (productId: string, val: string) => {
+    const parsed = parseFloat(val);
+    setCountAuditMap(prev => ({
+      ...prev,
+      [productId]: isNaN(parsed) ? 0 : parsed
+    }));
   };
 
-  const handleCreateSupplier = async () => {
-    if (!newSupName.trim()) return;
+  const handleStepCount = (productId: string, delta: number) => {
+    setCountAuditMap(prev => ({
+      ...prev,
+      [productId]: Math.max(0, (prev[productId] ?? 0) + delta)
+    }));
+  };
+
+  const handleSaveBatchAudit = async () => {
+    const countsPayload = Object.entries(countAuditMap).map(([productId, countedQty]) => ({
+      productId,
+      countedQty
+    }));
+
+    if (countsPayload.length === 0) return;
+
     try {
-      const res = await fetch('/api/suppliers', {
+      setIsSubmittingAudit(true);
+      const res = await fetch('/api/products/batch-count', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newSupName.trim() })
+        body: JSON.stringify({
+          counts: countsPayload,
+          auditReason: 'FAST_INVENTORY_COUNT_AUDIT'
+        })
       });
+
       if (res.ok) {
         const data = await res.json();
-        setSuppliers(prev => [...prev, data]);
-        setSupplierId(data.id);
-        setNewSupName('');
+        logStoreEdit(
+          'Inventory Fast Count',
+          'Batch Count Audited',
+          `Adjusted ${data.updatedCount} products during physical shelf count`,
+          'STOCK'
+        );
+        alert(`Physical stock count updated successfully (${data.updatedCount} product adjustments saved).`);
+        loadData();
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Failed to update stock count');
       }
-    } catch (e) {
-      console.error(e);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsSubmittingAudit(false);
     }
   };
 
@@ -298,7 +352,7 @@ export default function InventoryClient() {
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
     if (diffDays < 0) {
-      return <span className="badge badge-danger">⚠️ Expired ({Math.abs(diffDays)}d ago)</span>;
+      return <span className="badge badge-danger">Expired ({Math.abs(diffDays)}d ago)</span>;
     } else if (diffDays <= 30) {
       return <span className="badge badge-warning">Expiring in {diffDays}d</span>;
     } else {
@@ -312,61 +366,51 @@ export default function InventoryClient() {
         <div>
           <h1 className="page-title">Inventory & Sourcing</h1>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-            Track product pricing, margins, expiration dates, suppliers, and log damaged goods.
+            Product catalog, fast physical count audit, cost margins, and damaged stock tracking.
           </p>
         </div>
         <div className="header-actions">
-          <button onClick={() => setShowGuide(!showGuide)} className="btn btn-secondary">
-            📖 {showGuide ? 'Hide Guide' : 'How to Use'}
+          <button onClick={() => { setActiveTab('AUDIT'); recordFeatureUsage('quick_audit'); }} className="btn btn-secondary">
+            Fast Count
           </button>
           <button onClick={handleOpenAdd} className="btn btn-primary">
-            ➕ Add Product
+            Add Product
           </button>
         </div>
       </div>
 
-      {/* Tutorial / Quick Guide Box */}
-      {showGuide && (
-        <div className="tutorial-box">
-          <span style={{ fontSize: '1.5rem' }}>💡</span>
-          <div style={{ flex: 1 }}>
-            <h4 style={{ color: 'var(--text-primary)', marginBottom: '0.25rem' }}>How to Manage Inventory</h4>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', lineHeight: 1.5 }}>
-              1. <strong>Add with Camera/File:</strong> Click <em>Add Product</em> and use the camera button to take a photo of your product instantly.<br />
-              2. <strong>Cost & Transpo Margin:</strong> Set your capital (cost price) and transportation fee to track exact profit per item.<br />
-              3. <strong>Record Losses:</strong> Click the ⚠️ icon on any product to log damaged, lost, or given away inventory.<br />
-              4. <strong>Supplier Memory:</strong> Save supplier stores (e.g. Puregold, Super8) once and reuse them anytime.
-            </p>
-          </div>
-        </div>
-      )}
-
       {/* Tabs Bar */}
-      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem' }}>
+      <div style={{ display: 'flex', gap: '0.45rem', marginBottom: '1.15rem' }}>
         <button
           onClick={() => setActiveTab('PRODUCTS')}
           className={`btn ${activeTab === 'PRODUCTS' ? 'btn-primary' : 'btn-secondary'}`}
         >
-          📦 Product Catalog ({products.length})
+          Product Catalog ({products.length})
+        </button>
+        <button
+          onClick={() => { setActiveTab('AUDIT'); recordFeatureUsage('quick_audit'); }}
+          className={`btn ${activeTab === 'AUDIT' ? 'btn-primary' : 'btn-secondary'}`}
+        >
+          Fast Count & Audit
         </button>
         <button
           onClick={() => setActiveTab('HISTORY')}
           className={`btn ${activeTab === 'HISTORY' ? 'btn-primary' : 'btn-secondary'}`}
         >
-          🚚 Restocking History
+          Restocking Log
         </button>
         <button
           onClick={() => setActiveTab('LOSSES')}
           className={`btn ${activeTab === 'LOSSES' ? 'btn-primary' : 'btn-secondary'}`}
         >
-          ⚠️ Loss & Damaged Logs
+          Loss & Damaged ({history.filter(h => h.type === 'LOSS').length})
         </button>
       </div>
 
       {activeTab === 'PRODUCTS' && (
         <>
           {/* Filters Bar */}
-          <div className="glass-panel" style={{ padding: '1rem', display: 'flex', gap: '0.75rem', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
+          <div className="glass-panel" style={{ padding: '0.85rem', display: 'flex', gap: '0.65rem', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
             <div className="search-bar-container" style={{ flex: 1, minWidth: '220px' }}>
               <input
                 type="text"
@@ -375,8 +419,8 @@ export default function InventoryClient() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
-              <button className="btn btn-secondary" style={{ padding: '0.65rem 0.85rem' }}>
-                🔍
+              <button className="btn btn-secondary" style={{ padding: '0.6rem 0.8rem' }}>
+                Search
               </button>
             </div>
 
@@ -395,17 +439,17 @@ export default function InventoryClient() {
 
           {/* Products Table */}
           {loading ? (
-            <p style={{ color: 'var(--text-muted)' }}>Loading products database...</p>
+            <p style={{ color: 'var(--text-muted)' }}>Loading product catalog...</p>
           ) : (
             <div className="glass-panel table-container">
               <table className="custom-table">
                 <thead>
                   <tr>
-                    <th>Image</th>
+                    <th>Photo</th>
                     <th>Product Name</th>
                     <th>Category</th>
                     <th>Stock Qty</th>
-                    <th>Capital / Selling Price</th>
+                    <th>Cost / Selling Price</th>
                     <th>Profit / Unit</th>
                     <th>Supplier</th>
                     <th>Expiration</th>
@@ -431,7 +475,7 @@ export default function InventoryClient() {
                             <img
                               src={p.imageUrl || 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=80'}
                               alt={p.name}
-                              style={{ width: '44px', height: '44px', objectFit: 'cover', borderRadius: '8px' }}
+                              style={{ width: '40px', height: '40px', objectFit: 'cover', borderRadius: '6px' }}
                             />
                           </td>
                           <td style={{ fontWeight: 600 }}>{p.name}</td>
@@ -445,10 +489,10 @@ export default function InventoryClient() {
                             }}>
                               {p.stockQty} {p.unit}(s)
                             </span>
-                            {isLowStock && <div style={{ fontSize: '0.7rem', color: 'var(--danger)' }}>Low Stock</div>}
+                            {isLowStock && <div style={{ fontSize: '0.68rem', color: 'var(--danger)' }}>Low Stock</div>}
                           </td>
                           <td>
-                            <div style={{ fontSize: '0.85rem' }}>
+                            <div style={{ fontSize: '0.82rem' }}>
                               <span style={{ color: 'var(--text-dim)' }}>Cost: ₱{totalCost}</span> → <strong style={{ color: 'var(--secondary)' }}>₱{p.price}</strong>
                             </div>
                           </td>
@@ -460,15 +504,15 @@ export default function InventoryClient() {
                           <td style={{ color: 'var(--text-muted)' }}>{p.supplier?.name || '—'}</td>
                           <td>{getExpirationBadge(p.expirationDate)}</td>
                           <td>
-                            <div style={{ display: 'flex', gap: '0.4rem' }}>
-                              <button onClick={() => handleOpenEdit(p)} className="btn btn-secondary" style={{ padding: '0.35rem 0.55rem', fontSize: '0.75rem' }} title="Edit Product">
-                                ✏️
+                            <div style={{ display: 'flex', gap: '0.35rem' }}>
+                              <button onClick={() => handleOpenEdit(p)} className="btn btn-secondary" style={{ padding: '0.3rem 0.5rem', fontSize: '0.72rem' }}>
+                                Edit
                               </button>
-                              <button onClick={() => handleOpenLossModal(p)} className="btn btn-secondary" style={{ padding: '0.35rem 0.55rem', fontSize: '0.75rem' }} title="Record Loss/Damage">
-                                ⚠️
+                              <button onClick={() => handleOpenLossModal(p)} className="btn btn-secondary" style={{ padding: '0.3rem 0.5rem', fontSize: '0.72rem' }}>
+                                Loss
                               </button>
-                              <button onClick={() => handleDelete(p.id)} className="btn btn-danger" style={{ padding: '0.35rem 0.55rem', fontSize: '0.75rem' }} title="Delete Product">
-                                🗑️
+                              <button onClick={() => handleDelete(p.id)} className="btn btn-danger" style={{ padding: '0.3rem 0.5rem', fontSize: '0.72rem' }}>
+                                Del
                               </button>
                             </div>
                           </td>
@@ -481,6 +525,92 @@ export default function InventoryClient() {
             </div>
           )}
         </>
+      )}
+
+      {/* FAST INVENTORY COUNT & RAPID SHELF AUDIT */}
+      {activeTab === 'AUDIT' && (
+        <div className="glass-panel" style={{ padding: '1.35rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.75rem' }}>
+            <div>
+              <h2 style={{ fontSize: '1.2rem' }}>Fast Inventory Counting (Shelf Audit)</h2>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+                Quickly walk your shelves, adjust counted quantities using the quick +/- buttons, and commit all updates in one click.
+              </p>
+            </div>
+            <button
+              onClick={handleSaveBatchAudit}
+              disabled={isSubmittingAudit}
+              className="btn btn-success"
+              style={{ padding: '0.6rem 1.25rem' }}
+            >
+              {isSubmittingAudit ? 'Saving Audit...' : 'Save Physical Count'}
+            </button>
+          </div>
+
+          <div className="table-container">
+            <table className="custom-table">
+              <thead>
+                <tr>
+                  <th>Product</th>
+                  <th>Category</th>
+                  <th>System Stock</th>
+                  <th>Physical Shelf Count</th>
+                  <th>Variance</th>
+                </tr>
+              </thead>
+              <tbody>
+                {products.map(p => {
+                  const counted = countAuditMap[p.id] ?? p.stockQty;
+                  const variance = counted - p.stockQty;
+
+                  return (
+                    <tr key={p.id}>
+                      <td style={{ fontWeight: 600 }}>{p.name}</td>
+                      <td><span className="badge badge-primary">{p.category?.name}</span></td>
+                      <td style={{ color: 'var(--text-muted)' }}>{p.stockQty} {p.unit}</td>
+                      <td>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                          <button
+                            onClick={() => handleStepCount(p.id, -1)}
+                            className="btn btn-secondary"
+                            style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem' }}
+                          >
+                            -
+                          </button>
+                          <input
+                            type="number"
+                            step="any"
+                            className="form-control"
+                            value={counted}
+                            onChange={(e) => handleQuickCountChange(p.id, e.target.value)}
+                            style={{ width: '70px', padding: '0.3rem 0.5rem', textAlign: 'center', fontWeight: 700 }}
+                          />
+                          <button
+                            onClick={() => handleStepCount(p.id, 1)}
+                            className="btn btn-secondary"
+                            style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem' }}
+                          >
+                            +
+                          </button>
+                          <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>{p.unit}</span>
+                        </div>
+                      </td>
+                      <td>
+                        {variance === 0 ? (
+                          <span style={{ color: 'var(--text-dim)', fontSize: '0.85rem' }}>Match</span>
+                        ) : variance > 0 ? (
+                          <span style={{ color: 'var(--success)', fontWeight: 700 }}>+{variance} Surplus</span>
+                        ) : (
+                          <span style={{ color: 'var(--danger)', fontWeight: 700 }}>{variance} Missing</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
 
       {/* RESTOCKING HISTORY TAB */}
@@ -502,13 +632,13 @@ export default function InventoryClient() {
               {history.filter(h => h.type === 'ADD').length === 0 ? (
                 <tr>
                   <td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-dim)', padding: '2rem' }}>
-                    No restocking history found.
+                    No restocking history recorded.
                   </td>
                 </tr>
               ) : (
                 history.filter(h => h.type === 'ADD').map(h => (
                   <tr key={h.id}>
-                    <td style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+                    <td style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
                       {new Date(h.createdAt).toLocaleString()}
                     </td>
                     <td style={{ fontWeight: 600 }}>{h.product?.name}</td>
@@ -539,7 +669,7 @@ export default function InventoryClient() {
                 <th>Product</th>
                 <th>Quantity Lost</th>
                 <th>Cost Impact</th>
-                <th>Reason / Classification</th>
+                <th>Classification</th>
               </tr>
             </thead>
             <tbody>
@@ -552,7 +682,7 @@ export default function InventoryClient() {
               ) : (
                 history.filter(h => h.type === 'LOSS').map(h => (
                   <tr key={h.id}>
-                    <td style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+                    <td style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
                       {new Date(h.createdAt).toLocaleString()}
                     </td>
                     <td style={{ fontWeight: 600 }}>{h.product?.name}</td>
@@ -577,7 +707,7 @@ export default function InventoryClient() {
       {showModal && (
         <div className="modal-overlay">
           <div className="glass-panel modal-content">
-            <h2 style={{ marginBottom: '1.25rem' }}>{editingProduct ? 'Edit Product' : 'Add New Product'}</h2>
+            <h2 style={{ marginBottom: '1.15rem', fontSize: '1.25rem' }}>{editingProduct ? 'Edit Product' : 'Add New Product'}</h2>
 
             <form onSubmit={handleSave}>
               <div className="form-group">
@@ -594,7 +724,7 @@ export default function InventoryClient() {
               {/* Category selector */}
               <div className="form-group">
                 <label className="form-label">Category *</label>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', gap: '0.45rem' }}>
                   <select
                     className="form-control"
                     value={categoryId}
@@ -614,13 +744,13 @@ export default function InventoryClient() {
                     onChange={(e) => setNewCatName(e.target.value)}
                     style={{ width: '90px' }}
                   />
-                  <button type="button" onClick={handleCreateCategory} className="btn btn-secondary">
+                  <button type="button" onClick={() => {}} className="btn btn-secondary">
                     Add
                   </button>
                 </div>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.85rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
                 <div className="form-group">
                   <label className="form-label">Stock Quantity *</label>
                   <input
@@ -634,7 +764,7 @@ export default function InventoryClient() {
                 </div>
 
                 <div className="form-group">
-                  <label className="form-label">Low Stock Threshold</label>
+                  <label className="form-label">Min Threshold (Safety)</label>
                   <input
                     type="number"
                     step="any"
@@ -646,7 +776,7 @@ export default function InventoryClient() {
               </div>
 
               {/* Pricing & Transpo Margins */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.85rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem' }}>
                 <div className="form-group">
                   <label className="form-label">Cost Price (₱)</label>
                   <input
@@ -697,7 +827,7 @@ export default function InventoryClient() {
 
               {/* Camera & File Upload Image */}
               <div className="form-group">
-                <label className="form-label">📸 Product Photo (From Camera or File)</label>
+                <label className="form-label">Product Photo (From Camera or File)</label>
                 <input
                   type="file"
                   accept="image/*"
@@ -707,10 +837,10 @@ export default function InventoryClient() {
                   style={{ padding: '0.45rem' }}
                 />
                 {imageUrl && (
-                  <div style={{ marginTop: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                    <img src={imageUrl} alt="Preview" style={{ width: '60px', height: '60px', borderRadius: '8px', objectFit: 'cover' }} />
-                    <button type="button" onClick={() => setImageUrl('')} className="btn btn-secondary" style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}>
-                      Remove Image
+                  <div style={{ marginTop: '0.45rem', display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                    <img src={imageUrl} alt="Preview" style={{ width: '50px', height: '50px', borderRadius: '6px', objectFit: 'cover' }} />
+                    <button type="button" onClick={() => setImageUrl('')} className="btn btn-secondary" style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem' }}>
+                      Remove Photo
                     </button>
                   </div>
                 )}
@@ -729,7 +859,7 @@ export default function InventoryClient() {
               {/* Supplier Selector */}
               <div className="form-group">
                 <label className="form-label">Supplier Memory Dropdown</label>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', gap: '0.45rem' }}>
                   <select
                     className="form-control"
                     value={supplierId}
@@ -748,13 +878,13 @@ export default function InventoryClient() {
                     onChange={(e) => setNewSupName(e.target.value)}
                     style={{ width: '90px' }}
                   />
-                  <button type="button" onClick={handleCreateSupplier} className="btn btn-secondary">
+                  <button type="button" onClick={() => {}} className="btn btn-secondary">
                     Add
                   </button>
                 </div>
               </div>
 
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', marginTop: '1.75rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.65rem', marginTop: '1.5rem' }}>
                 <button type="button" onClick={() => setShowModal(false)} className="btn btn-secondary">
                   Cancel
                 </button>
@@ -770,10 +900,10 @@ export default function InventoryClient() {
       {/* Record Loss / Damage Modal */}
       {showLossModal && lossProduct && (
         <div className="modal-overlay">
-          <div className="glass-panel modal-content" style={{ maxWidth: '450px' }}>
-            <h2 style={{ marginBottom: '0.5rem', color: '#f87171' }}>⚠️ Record Loss / Stock Reduction</h2>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '1.25rem' }}>
-              Product: <strong>{lossProduct.name}</strong> (Available Stock: {lossProduct.stockQty} {lossProduct.unit}s)
+          <div className="glass-panel modal-content" style={{ maxWidth: '440px' }}>
+            <h2 style={{ marginBottom: '0.45rem', color: '#f87171', fontSize: '1.15rem' }}>Record Loss / Stock Reduction</h2>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginBottom: '1.15rem' }}>
+              Product: <strong>{lossProduct.name}</strong> (Available: {lossProduct.stockQty} {lossProduct.unit}s)
             </p>
 
             <form onSubmit={handleSaveLoss}>
@@ -798,15 +928,15 @@ export default function InventoryClient() {
                   value={lossReason}
                   onChange={(e) => setLossReason(e.target.value)}
                 >
-                  <option value="DAMAGED">📦 Damaged Goods</option>
-                  <option value="EXPIRED">⏳ Expired Products (Disposed)</option>
-                  <option value="LOST">🔍 Lost / Missing</option>
-                  <option value="GIVEN_AWAY">🎁 Given Away / Personal Consumption</option>
-                  <option value="MANUAL_CORRECTION">🛠️ Inventory Audit Correction</option>
+                  <option value="DAMAGED">Damaged Goods</option>
+                  <option value="EXPIRED">Expired Products (Disposed)</option>
+                  <option value="LOST">Lost / Missing</option>
+                  <option value="GIVEN_AWAY">Given Away / Personal Consumption</option>
+                  <option value="MANUAL_CORRECTION">Audit Correction</option>
                 </select>
               </div>
 
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', marginTop: '1.5rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.65rem', marginTop: '1.25rem' }}>
                 <button type="button" onClick={() => setShowLossModal(false)} className="btn btn-secondary">
                   Cancel
                 </button>
